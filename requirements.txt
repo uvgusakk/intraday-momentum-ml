@@ -1,0 +1,12 @@
+pandas
+numpy
+alpaca-py
+python-dotenv
+pyarrow
+pytz
+scikit-learn
+lightgbm
+# xgboost  # alternative to lightgbm
+matplotlib
+tqdm
+joblib
