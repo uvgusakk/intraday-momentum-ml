@@ -190,6 +190,8 @@ def train_lightgbm_classifier(
         colsample_bytree=0.8,
         class_weight="balanced",
         random_state=42,
+        verbosity=-1,
+        force_col_wise=True,
     )
 
     fit_kwargs: dict[str, Any] = {}
