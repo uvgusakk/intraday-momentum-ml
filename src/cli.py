@@ -8,12 +8,27 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
-from .backtest_ml_filter import run_ml_filtered_backtest
+from .backtest_ml_filter import _build_feature_row, _load_artifacts, _raw_scores, run_ml_filtered_backtest
 from .baseline_strategy import run_baseline_backtest
 from .config import load_config
+from .config import (
+    DEFAULT_DECISION_FREQ_MINS,
+    DEFAULT_EXECUTION_SPREAD_BPS,
+    DEFAULT_ML_LABEL_HORIZON_MINS,
+    DEFAULT_MINUTE_STOP_MONITORING,
+    DEFAULT_MM_CAP,
+    DEFAULT_MM_FLOOR,
+    DEFAULT_MM_LOOKBACK_DAYS,
+    DEFAULT_SCOREFORWARD_LABEL_MODE,
+    DEFAULT_SOFT_SIZE_CAP,
+    DEFAULT_SOFT_SIZE_FLOOR,
+    DEFAULT_USE_NEXT_BAR_OPEN,
+)
 from .data_alpaca import fetch_minute_bars
+from .engine.backtest_engine import BacktestConfig, BacktestEngine, FixedQuantityRiskManager
 from .features_ml import build_ml_dataset
 from .indicators import (
     compute_gap_adjusted_bands,
@@ -22,6 +37,8 @@ from .indicators import (
     compute_vwap,
 )
 from .preprocess import preprocess_bars
+from .scoreforward_eval import ScoreforwardConfig, run_ml_scoreforward_backtests
+from .strategies import BaselineNoiseAreaStrategy, MLOutputSizerRiskManager
 from .train_ml import train_walk_forward_models
 
 logger = logging.getLogger(__name__)
@@ -55,6 +72,9 @@ def _paths() -> dict[str, Path]:
         "ml_comparison": data_dir / "ml_vs_baseline.parquet",
         "ml_comparison_json": data_dir / "ml_vs_baseline.json",
         "ml_decisions": data_dir / "ml_candidate_decisions.parquet",
+        "ml_scoreforward_summary": data_dir / "ml_scoreforward_summary.csv",
+        "ml_scoreforward_splits": data_dir / "ml_scoreforward_splits.csv",
+        "ml_scoreforward_dir": data_dir / "ml_scoreforward",
     }
 
 
@@ -73,9 +93,76 @@ def _dump_json(path: Path, payload: dict[str, Any]) -> None:
 def _enrich_bars(preprocessed: pd.DataFrame) -> pd.DataFrame:
     enriched = compute_intraday_move_from_open(preprocessed)
     enriched = compute_sigma_profile(enriched, lookback_days=14)
-    enriched = compute_gap_adjusted_bands(enriched, vm=1.0)
+    enriched = compute_gap_adjusted_bands(enriched)
     enriched = compute_vwap(enriched)
     return enriched
+
+
+def _add_realism_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--use-next-bar-open",
+        dest="use_next_bar_open",
+        action="store_true",
+        default=DEFAULT_USE_NEXT_BAR_OPEN,
+        help="Fill decision-time entries and flips at the next minute open.",
+    )
+    parser.add_argument(
+        "--no-next-bar-open",
+        dest="use_next_bar_open",
+        action="store_false",
+        help="Use same-bar close fills instead of next-bar open execution.",
+    )
+    parser.add_argument(
+        "--minute-stop-monitoring",
+        dest="minute_stop_monitoring",
+        action="store_true",
+        default=DEFAULT_MINUTE_STOP_MONITORING,
+        help="Check stops on every minute bar instead of only decision timestamps.",
+    )
+    parser.add_argument(
+        "--no-minute-stop-monitoring",
+        dest="minute_stop_monitoring",
+        action="store_false",
+        help="Only check stops at decision timestamps.",
+    )
+    parser.add_argument(
+        "--spread-bps",
+        type=float,
+        default=DEFAULT_EXECUTION_SPREAD_BPS,
+        help="Full bid/ask spread proxy in basis points; half-spread is charged on each fill.",
+    )
+
+
+def _add_realistic_soft_improvement_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--execution-chase-control",
+        action="store_true",
+        help="Downsize entries when the realized next-bar fill drifts too far against the signal close.",
+    )
+    parser.add_argument("--execution-chase-bps", type=float, default=8.0)
+    parser.add_argument("--execution-chase-mult", type=float, default=0.5)
+    parser.add_argument(
+        "--execution-chase-relative",
+        action="store_true",
+        help="Use a band-width / intraday-vol relative entry drift threshold instead of a raw bps threshold.",
+    )
+    parser.add_argument("--execution-chase-band-frac", type=float, default=0.15)
+    parser.add_argument("--execution-chase-vol-mult", type=float, default=0.75)
+    parser.add_argument(
+        "--hybrid-stop-mode",
+        action="store_true",
+        help="Only trigger minute-level stops for catastrophic stop breaches; keep standard stop checks at decision times.",
+    )
+    parser.add_argument("--catastrophic-stop-bps", type=float, default=10.0)
+    parser.add_argument(
+        "--intraday-risk-overlay",
+        action="store_true",
+        help="Downsize ML exposure when current intraday volatility is elevated versus recent candidate history.",
+    )
+    parser.add_argument("--intraday-risk-lookback-days", type=int, default=60)
+    parser.add_argument("--intraday-risk-quantile", type=float, default=0.8)
+    parser.add_argument("--intraday-risk-downsize-mult", type=float, default=0.75)
+
 
 
 def cmd_fetch(args: argparse.Namespace) -> None:
@@ -103,7 +190,6 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     )
     logger.info("Saved raw bars to %s (%d rows)", p["raw"], len(bars))
 
-
 def cmd_preprocess(_: argparse.Namespace) -> None:
     p = _paths()
     raw = _read_parquet_required(p["raw"])
@@ -113,18 +199,17 @@ def cmd_preprocess(_: argparse.Namespace) -> None:
     enriched = _enrich_bars(clean)
     enriched.to_parquet(p["enriched"], index=False)
 
-    _dump_json(
-        p["data_dir"] / "preprocess_meta.json",
-        {
-            "rows_raw": int(len(raw)),
-            "rows_preprocessed": int(len(clean)),
-            "rows_enriched": int(len(enriched)),
-            "preprocessed_output": str(p["preprocessed"]),
-            "enriched_output": str(p["enriched"]),
-        },
-    )
+    preprocess_meta: dict[str, Any] = {
+        "rows_raw": int(len(raw)),
+        "rows_preprocessed": int(len(clean)),
+        "rows_enriched": int(len(enriched)),
+        "preprocessed_output": str(p["preprocessed"]),
+        "enriched_output": str(p["enriched"]),
+    }
+
+    _dump_json(p["data_dir"] / "preprocess_meta.json", preprocess_meta)
+    logger.info("Saved default enriched bars to %s", p["enriched"])
     logger.info("Saved preprocessed bars to %s", p["preprocessed"])
-    logger.info("Saved enriched bars to %s", p["enriched"])
 
 
 def cmd_baseline_backtest(args: argparse.Namespace) -> None:
@@ -140,6 +225,9 @@ def cmd_baseline_backtest(args: argparse.Namespace) -> None:
         slippage_per_share=args.slippage_per_share,
         decision_freq_mins=args.decision_freq_mins,
         first_trade_time=args.first_trade_time,
+        use_next_bar_open=args.use_next_bar_open,
+        minute_stop_monitoring=args.minute_stop_monitoring,
+        spread_bps=args.spread_bps,
     )
 
     out["equity_curve"].to_parquet(p["baseline_equity"], index=False)
@@ -165,6 +253,9 @@ def cmd_build_ml_dataset(args: argparse.Namespace) -> None:
             "slippage_per_share": args.slippage_per_share,
             "decision_freq_mins": args.decision_freq_mins,
             "first_trade_time": args.first_trade_time,
+            "use_next_bar_open": args.use_next_bar_open,
+            "minute_stop_monitoring": args.minute_stop_monitoring,
+            "spread_bps": args.spread_bps,
         },
         label_mode=args.label_mode,
         horizon_mins=args.horizon_mins,
@@ -190,6 +281,10 @@ def cmd_train_ml(_: argparse.Namespace) -> None:
         val_months=_.val_months,
         test_months=_.test_months,
         step_months=_.step_months,
+        target_mode=_.target_mode,
+        target_quantile=_.target_quantile,
+        side_filter=_.side_filter,
+        artifact_subdir=_.artifact_subdir,
     )
     logger.info("Training complete. Report: %s", out["report_path"])
 
@@ -210,15 +305,31 @@ def cmd_backtest_ml(args: argparse.Namespace) -> None:
         model_path=args.model_path,
         calibration_path=args.calibration_path,
         threshold_path=args.threshold_path,
-        flip_reject_mode=args.flip_reject_mode,
         filter_mode="entry_only",
         allocation_mode="soft_size",
         size_floor=args.size_floor,
         size_cap=args.size_cap,
-        neutral_zone=not args.no_neutral_zone,
-        regime_overlay=not args.no_regime_overlay,
-        regime_lookback_months=args.regime_lookback_months,
-        regime_min_trades=args.regime_min_trades,
+        neutral_zone=True,
+        regime_overlay=False,
+        market_vol_overlay=args.market_vol_overlay,
+        market_vol_lookback_days=args.market_vol_lookback_days,
+        market_vol_floor=args.market_vol_floor,
+        market_vol_cap=args.market_vol_cap,
+        use_next_bar_open=args.use_next_bar_open,
+        minute_stop_monitoring=args.minute_stop_monitoring,
+        spread_bps=args.spread_bps,
+        execution_chase_control=args.execution_chase_control,
+        execution_chase_bps=args.execution_chase_bps,
+        execution_chase_mult=args.execution_chase_mult,
+        execution_chase_relative=args.execution_chase_relative,
+        execution_chase_band_frac=args.execution_chase_band_frac,
+        execution_chase_vol_mult=args.execution_chase_vol_mult,
+        hybrid_stop_mode=args.hybrid_stop_mode,
+        catastrophic_stop_bps=args.catastrophic_stop_bps,
+        intraday_risk_overlay=args.intraday_risk_overlay,
+        intraday_risk_lookback_days=args.intraday_risk_lookback_days,
+        intraday_risk_quantile=args.intraday_risk_quantile,
+        intraday_risk_downsize_mult=args.intraday_risk_downsize_mult,
     )
 
     out["equity_curve"].to_parquet(p["ml_equity"], index=False)
@@ -235,6 +346,242 @@ def cmd_backtest_ml(args: argparse.Namespace) -> None:
             "baseline_summary": out["baseline_summary"],
             "ml_metrics": out["metrics"],
             "comparison": out["comparison"].to_dict(orient="index"),
+        },
+    )
+
+    logger.info("Saved ML equity to %s", p["ml_equity"])
+    logger.info("Saved ML trades to %s", p["ml_trades"])
+    logger.info("Saved ML metrics to %s", p["ml_metrics"])
+
+
+def cmd_backtest_ml_scoreforward(args: argparse.Namespace) -> None:
+    p = _paths()
+    bars = _read_parquet_required(p["enriched"])
+    methods = [m.strip() for m in str(args.methods).split(",") if m.strip()]
+    overrides: dict[str, dict[str, Any]] = {
+        "soft": {
+            "execution_chase_control": args.execution_chase_control,
+            "execution_chase_bps": args.execution_chase_bps,
+            "execution_chase_mult": args.execution_chase_mult,
+            "execution_chase_relative": args.execution_chase_relative,
+            "execution_chase_band_frac": args.execution_chase_band_frac,
+            "execution_chase_vol_mult": args.execution_chase_vol_mult,
+            "hybrid_stop_mode": args.hybrid_stop_mode,
+            "catastrophic_stop_bps": args.catastrophic_stop_bps,
+            "intraday_risk_overlay": args.intraday_risk_overlay,
+            "intraday_risk_lookback_days": args.intraday_risk_lookback_days,
+            "intraday_risk_quantile": args.intraday_risk_quantile,
+            "intraday_risk_downsize_mult": args.intraday_risk_downsize_mult,
+        },
+        "mm": {
+            "market_vol_lookback_days": args.market_vol_lookback_days,
+            "market_vol_floor": args.market_vol_floor,
+            "market_vol_cap": args.market_vol_cap,
+            "execution_chase_control": args.execution_chase_control,
+            "execution_chase_bps": args.execution_chase_bps,
+            "execution_chase_mult": args.execution_chase_mult,
+            "execution_chase_relative": args.execution_chase_relative,
+            "execution_chase_band_frac": args.execution_chase_band_frac,
+            "execution_chase_vol_mult": args.execution_chase_vol_mult,
+            "hybrid_stop_mode": args.hybrid_stop_mode,
+            "catastrophic_stop_bps": args.catastrophic_stop_bps,
+            "intraday_risk_overlay": args.intraday_risk_overlay,
+            "intraday_risk_lookback_days": args.intraday_risk_lookback_days,
+            "intraday_risk_quantile": args.intraday_risk_quantile,
+            "intraday_risk_downsize_mult": args.intraday_risk_downsize_mult,
+        },
+    }
+    out = run_ml_scoreforward_backtests(
+        bars,
+        config=ScoreforwardConfig(
+            initial_aum=args.initial_aum,
+            sigma_target=args.sigma_target,
+            lev_cap=args.lev_cap,
+            commission_per_share=args.commission_per_share,
+            slippage_per_share=args.slippage_per_share,
+            decision_freq_mins=args.decision_freq_mins,
+            first_trade_time=args.first_trade_time,
+            use_next_bar_open=args.use_next_bar_open,
+            minute_stop_monitoring=args.minute_stop_monitoring,
+            spread_bps=args.spread_bps,
+            label_mode=args.label_mode,
+            horizon_mins=args.horizon_mins,
+            train_months=args.train_months,
+            val_months=args.val_months,
+            test_months=args.test_months,
+            step_months=args.step_months,
+            warmup_days=args.warmup_days,
+        ),
+        methods=methods,
+        method_overrides=overrides,
+    )
+
+    p["ml_scoreforward_dir"].mkdir(parents=True, exist_ok=True)
+    out["summary"].to_csv(p["ml_scoreforward_summary"], index=False)
+    out["split_metrics"].to_csv(p["ml_scoreforward_splits"], index=False)
+    for method, payload in out["outputs"].items():
+        payload["equity_curve"].to_parquet(p["ml_scoreforward_dir"] / f"{method}_equity_curve.parquet", index=False)
+        payload["trades"].to_parquet(p["ml_scoreforward_dir"] / f"{method}_trades.parquet", index=False)
+        _dump_json(p["ml_scoreforward_dir"] / f"{method}_summary.json", payload["summary"])
+
+    logger.info("Saved score-forward summary to %s", p["ml_scoreforward_summary"])
+    logger.info("Saved score-forward split metrics to %s", p["ml_scoreforward_splits"])
+
+
+def cmd_run_system_baseline_engine(args: argparse.Namespace) -> None:
+    p = _paths()
+    bars = _read_parquet_required(p["enriched"])
+
+    engine = BacktestEngine(
+        strategy=BaselineNoiseAreaStrategy(
+            decision_freq_mins=args.decision_freq_mins,
+            first_trade_time=args.first_trade_time,
+        ),
+        risk_manager=FixedQuantityRiskManager(),
+        config=BacktestConfig(
+            initial_aum=args.initial_aum,
+            sigma_target=args.sigma_target,
+            lev_cap=args.lev_cap,
+            commission_per_share=args.commission_per_share,
+            slippage_per_share=args.slippage_per_share,
+            decision_freq_mins=args.decision_freq_mins,
+            first_trade_time=args.first_trade_time,
+            use_next_bar_open=args.use_next_bar_open,
+            minute_stop_monitoring=args.minute_stop_monitoring,
+            spread_bps=args.spread_bps,
+        ),
+    )
+    result = engine.run(bars)
+
+    result.equity_curve.to_parquet(p["baseline_equity"], index=False)
+    result.trades.to_parquet(p["baseline_trades"], index=False)
+    _dump_json(p["baseline_summary"], result.summary)
+
+    logger.info("Saved baseline equity to %s", p["baseline_equity"])
+    logger.info("Saved baseline trades to %s", p["baseline_trades"])
+    logger.info("Saved baseline summary to %s", p["baseline_summary"])
+
+
+def cmd_run_system_ml_backtest_engine(args: argparse.Namespace) -> None:
+    p = _paths()
+    bars = _read_parquet_required(p["enriched"])
+    feat = bars
+
+    model, calibrator, threshold, prob_q20, prob_q40, prob_q60, prob_q80 = _load_artifacts(
+        args.model_path,
+        args.calibration_path,
+        args.threshold_path,
+    )
+
+    strategy = BaselineNoiseAreaStrategy(
+        decision_freq_mins=args.decision_freq_mins,
+        first_trade_time=args.first_trade_time,
+    )
+    risk_manager = MLOutputSizerRiskManager(
+        threshold=threshold,
+        prob_q20=prob_q20,
+        prob_q40=prob_q40,
+        prob_q60=prob_q60,
+        prob_q80=prob_q80,
+        allocation_mode="soft_size",
+        neutral_zone=not args.no_neutral_zone,
+        size_floor=args.size_floor,
+        size_cap=args.size_cap,
+        regime_overlay=not args.no_regime_overlay,
+        regime_lookback_months=args.regime_lookback_months,
+        regime_min_trades=args.regime_min_trades,
+    )
+
+    def _ml_market_state_builder(**kwargs: Any) -> dict[str, Any]:
+        row = kwargs["row"]
+        signal = kwargs["signal"]
+        if int(signal.desired_side) == 0:
+            return {}
+        x_row = _build_feature_row(row, side=int(signal.desired_side), model=model)
+        if x_row.isna().any(axis=None):
+            return {"p_good": float("nan")}
+        scores = _raw_scores(model, x_row)
+        p_good = float(calibrator.predict_proba(scores)[0])
+        return {"p_good": p_good}
+
+    engine = BacktestEngine(
+        strategy=strategy,
+        risk_manager=risk_manager,
+        config=BacktestConfig(
+            initial_aum=args.initial_aum,
+            sigma_target=args.sigma_target,
+            lev_cap=args.lev_cap,
+            commission_per_share=args.commission_per_share,
+            slippage_per_share=args.slippage_per_share,
+            decision_freq_mins=args.decision_freq_mins,
+            first_trade_time=args.first_trade_time,
+            use_next_bar_open=args.use_next_bar_open,
+            minute_stop_monitoring=args.minute_stop_monitoring,
+            spread_bps=args.spread_bps,
+        ),
+        market_state_builder=_ml_market_state_builder,
+    )
+    result = engine.run(feat)
+
+    baseline_summary = run_baseline_backtest(
+        feat,
+        initial_aum=args.initial_aum,
+        sigma_target=args.sigma_target,
+        lev_cap=args.lev_cap,
+        commission_per_share=args.commission_per_share,
+        slippage_per_share=args.slippage_per_share,
+        decision_freq_mins=args.decision_freq_mins,
+        first_trade_time=args.first_trade_time,
+        use_next_bar_open=args.use_next_bar_open,
+        minute_stop_monitoring=args.minute_stop_monitoring,
+        spread_bps=args.spread_bps,
+    )["summary"]
+
+    ml_metrics = dict(result.summary)
+    ml_metrics.update(
+        {
+            "threshold": float(threshold),
+            "allocation_mode": "soft_size",
+            "size_floor": float(args.size_floor),
+            "size_cap": float(args.size_cap),
+            "neutral_zone": bool(not args.no_neutral_zone),
+            "regime_overlay": bool(not args.no_regime_overlay),
+            "regime_lookback_months": int(args.regime_lookback_months),
+            "regime_min_trades": int(args.regime_min_trades),
+            "avg_size_mult": float(result.trades["size_mult"].dropna().mean()) if not result.trades.empty else 1.0,
+            "overlay_enabled_rate": float(result.trades["overlay_enabled"].fillna(False).astype(float).mean())
+            if not result.trades.empty
+            else 0.0,
+        }
+    )
+
+    keys = [
+        "final_equity",
+        "sharpe",
+        "cagr_ish",
+        "max_drawdown",
+        "trades_count",
+        "turnover",
+        "total_costs",
+    ]
+    comparison = pd.DataFrame(
+        {
+            "baseline": {k: float(baseline_summary.get(k, np.nan)) for k in keys},
+            "ml_filter": {k: float(ml_metrics.get(k, np.nan)) for k in keys},
+        }
+    )
+    comparison["delta"] = comparison["ml_filter"] - comparison["baseline"]
+
+    result.equity_curve.to_parquet(p["ml_equity"], index=False)
+    result.trades.to_parquet(p["ml_trades"], index=False)
+    comparison.to_parquet(p["ml_comparison"], index=True)
+    _dump_json(p["ml_metrics"], ml_metrics)
+    _dump_json(
+        p["ml_comparison_json"],
+        {
+            "baseline_summary": baseline_summary,
+            "ml_metrics": ml_metrics,
+            "comparison": comparison.to_dict(orient="index"),
         },
     )
 
@@ -265,8 +612,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_base.add_argument("--lev-cap", type=float, default=4.0)
     p_base.add_argument("--commission-per-share", type=float, default=0.0035)
     p_base.add_argument("--slippage-per-share", type=float, default=0.001)
-    p_base.add_argument("--decision-freq-mins", type=int, default=30)
+    p_base.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
     p_base.add_argument("--first-trade-time", default="10:00")
+    _add_realism_args(p_base)
     p_base.set_defaults(func=cmd_baseline_backtest)
 
     p_ds = sub.add_parser("build_ml_dataset", help="Build ML dataset from baseline entries")
@@ -275,10 +623,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds.add_argument("--lev-cap", type=float, default=4.0)
     p_ds.add_argument("--commission-per-share", type=float, default=0.0035)
     p_ds.add_argument("--slippage-per-share", type=float, default=0.001)
-    p_ds.add_argument("--decision-freq-mins", type=int, default=30)
+    p_ds.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
     p_ds.add_argument("--first-trade-time", default="10:00")
-    p_ds.add_argument("--label-mode", choices=["baseline_trade", "fixed_horizon"], default="fixed_horizon")
-    p_ds.add_argument("--horizon-mins", type=int, default=30)
+    p_ds.add_argument(
+        "--label-mode",
+        choices=["baseline_trade", "fixed_horizon"],
+        default=DEFAULT_SCOREFORWARD_LABEL_MODE,
+    )
+    p_ds.add_argument("--horizon-mins", type=int, default=DEFAULT_ML_LABEL_HORIZON_MINS)
+    _add_realism_args(p_ds)
     p_ds.set_defaults(func=cmd_build_ml_dataset)
 
     p_train = sub.add_parser("train_ml", help="Train walk-forward ML models")
@@ -286,6 +639,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--val-months", type=int, default=3)
     p_train.add_argument("--test-months", type=int, default=3)
     p_train.add_argument("--step-months", type=int, default=3)
+    p_train.add_argument("--target-mode", choices=["binary", "large_winner"], default="binary")
+    p_train.add_argument("--target-quantile", type=float, default=0.70)
+    p_train.add_argument("--side-filter", choices=["all", "long", "short"], default="all")
+    p_train.add_argument("--artifact-subdir", default="models")
     p_train.set_defaults(func=cmd_train_ml)
 
     p_bt_ml = sub.add_parser("backtest_ml", help="Run ML-filtered backtest")
@@ -294,20 +651,81 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt_ml.add_argument("--lev-cap", type=float, default=4.0)
     p_bt_ml.add_argument("--commission-per-share", type=float, default=0.0035)
     p_bt_ml.add_argument("--slippage-per-share", type=float, default=0.001)
-    p_bt_ml.add_argument("--decision-freq-mins", type=int, default=30)
+    p_bt_ml.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
     p_bt_ml.add_argument("--first-trade-time", default="10:00")
     p_bt_ml.add_argument("--model-path", default=None)
     p_bt_ml.add_argument("--calibration-path", default=None)
     p_bt_ml.add_argument("--threshold-path", default=None)
-    p_bt_ml.add_argument("--flip-reject-mode", choices=["hold", "close_flat"], default="hold")
-    # CLI path is soft-sizing only; hard-filter remains notebook diagnostics.
-    p_bt_ml.add_argument("--size-floor", type=float, default=0.85)
-    p_bt_ml.add_argument("--size-cap", type=float, default=1.15)
-    p_bt_ml.add_argument("--no-neutral-zone", action="store_true")
-    p_bt_ml.add_argument("--no-regime-overlay", action="store_true")
-    p_bt_ml.add_argument("--regime-lookback-months", type=int, default=6)
-    p_bt_ml.add_argument("--regime-min-trades", type=int, default=80)
+    p_bt_ml.add_argument("--size-floor", type=float, default=DEFAULT_SOFT_SIZE_FLOOR)
+    p_bt_ml.add_argument("--size-cap", type=float, default=DEFAULT_SOFT_SIZE_CAP)
+    p_bt_ml.add_argument("--market-vol-overlay", action="store_true")
+    p_bt_ml.add_argument("--market-vol-lookback-days", type=int, default=DEFAULT_MM_LOOKBACK_DAYS)
+    p_bt_ml.add_argument("--market-vol-floor", type=float, default=DEFAULT_MM_FLOOR)
+    p_bt_ml.add_argument("--market-vol-cap", type=float, default=DEFAULT_MM_CAP)
+    _add_realism_args(p_bt_ml)
+    _add_realistic_soft_improvement_args(p_bt_ml)
     p_bt_ml.set_defaults(func=cmd_backtest_ml)
+
+    p_bt_mlsf = sub.add_parser("backtest_ml_scoreforward", help="Run true rolling retrain / score-forward ML backtest")
+    p_bt_mlsf.add_argument("--methods", default="soft", help="Comma-separated serious methods: soft,mm")
+    p_bt_mlsf.add_argument("--initial-aum", type=float, default=100000)
+    p_bt_mlsf.add_argument("--sigma-target", type=float, default=0.02)
+    p_bt_mlsf.add_argument("--lev-cap", type=float, default=4.0)
+    p_bt_mlsf.add_argument("--commission-per-share", type=float, default=0.0035)
+    p_bt_mlsf.add_argument("--slippage-per-share", type=float, default=0.001)
+    p_bt_mlsf.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
+    p_bt_mlsf.add_argument("--first-trade-time", default="10:00")
+    p_bt_mlsf.add_argument(
+        "--label-mode",
+        choices=["baseline_trade", "fixed_horizon"],
+        default=DEFAULT_SCOREFORWARD_LABEL_MODE,
+    )
+    p_bt_mlsf.add_argument("--horizon-mins", type=int, default=DEFAULT_ML_LABEL_HORIZON_MINS)
+    p_bt_mlsf.add_argument("--train-months", type=int, default=24)
+    p_bt_mlsf.add_argument("--val-months", type=int, default=3)
+    p_bt_mlsf.add_argument("--test-months", type=int, default=3)
+    p_bt_mlsf.add_argument("--step-months", type=int, default=3)
+    p_bt_mlsf.add_argument("--warmup-days", type=int, default=90)
+    p_bt_mlsf.add_argument("--market-vol-lookback-days", type=int, default=DEFAULT_MM_LOOKBACK_DAYS)
+    p_bt_mlsf.add_argument("--market-vol-floor", type=float, default=DEFAULT_MM_FLOOR)
+    p_bt_mlsf.add_argument("--market-vol-cap", type=float, default=DEFAULT_MM_CAP)
+    _add_realism_args(p_bt_mlsf)
+    _add_realistic_soft_improvement_args(p_bt_mlsf)
+    p_bt_mlsf.set_defaults(func=cmd_backtest_ml_scoreforward)
+
+    p_run = sub.add_parser("run_system", help="Run the modular engine system")
+    run_sub = p_run.add_subparsers(dest="run_system_command", required=True)
+
+    p_run_base = run_sub.add_parser("baseline_backtest_engine", help="Run baseline through BacktestEngine")
+    p_run_base.add_argument("--initial-aum", type=float, default=100000)
+    p_run_base.add_argument("--sigma-target", type=float, default=0.02)
+    p_run_base.add_argument("--lev-cap", type=float, default=4.0)
+    p_run_base.add_argument("--commission-per-share", type=float, default=0.0035)
+    p_run_base.add_argument("--slippage-per-share", type=float, default=0.001)
+    p_run_base.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
+    p_run_base.add_argument("--first-trade-time", default="10:00")
+    _add_realism_args(p_run_base)
+    p_run_base.set_defaults(func=cmd_run_system_baseline_engine)
+
+    p_run_ml = run_sub.add_parser("ml_backtest_engine", help="Run ML-sized baseline through BacktestEngine")
+    p_run_ml.add_argument("--initial-aum", type=float, default=100000)
+    p_run_ml.add_argument("--sigma-target", type=float, default=0.02)
+    p_run_ml.add_argument("--lev-cap", type=float, default=4.0)
+    p_run_ml.add_argument("--commission-per-share", type=float, default=0.0035)
+    p_run_ml.add_argument("--slippage-per-share", type=float, default=0.001)
+    p_run_ml.add_argument("--decision-freq-mins", type=int, default=DEFAULT_DECISION_FREQ_MINS)
+    p_run_ml.add_argument("--first-trade-time", default="10:00")
+    p_run_ml.add_argument("--model-path", default=None)
+    p_run_ml.add_argument("--calibration-path", default=None)
+    p_run_ml.add_argument("--threshold-path", default=None)
+    p_run_ml.add_argument("--size-floor", type=float, default=DEFAULT_SOFT_SIZE_FLOOR)
+    p_run_ml.add_argument("--size-cap", type=float, default=DEFAULT_SOFT_SIZE_CAP)
+    p_run_ml.add_argument("--no-neutral-zone", action="store_true")
+    p_run_ml.add_argument("--no-regime-overlay", action="store_true")
+    p_run_ml.add_argument("--regime-lookback-months", type=int, default=6)
+    p_run_ml.add_argument("--regime-min-trades", type=int, default=80)
+    _add_realism_args(p_run_ml)
+    p_run_ml.set_defaults(func=cmd_run_system_ml_backtest_engine)
 
     return parser
 
