@@ -36,6 +36,12 @@ from .indicators import (
     compute_sigma_profile,
     compute_vwap,
 )
+from .live_alpaca import AlpacaLiveMarketData, AlpacaPaperBroker
+from .live_strategy_runtime import (
+    LivePaperStrategyRunner,
+    list_live_variants,
+    run_live_strategy_board_loop,
+)
 from .preprocess import preprocess_bars
 from .scoreforward_eval import ScoreforwardConfig, run_ml_scoreforward_backtests
 from .strategies import BaselineNoiseAreaStrategy, MLOutputSizerRiskManager
@@ -75,6 +81,7 @@ def _paths() -> dict[str, Path]:
         "ml_scoreforward_summary": data_dir / "ml_scoreforward_summary.csv",
         "ml_scoreforward_splits": data_dir / "ml_scoreforward_splits.csv",
         "ml_scoreforward_dir": data_dir / "ml_scoreforward",
+        "live_dir": data_dir / "live",
     }
 
 
@@ -428,6 +435,85 @@ def cmd_backtest_ml_scoreforward(args: argparse.Namespace) -> None:
     logger.info("Saved score-forward split metrics to %s", p["ml_scoreforward_splits"])
 
 
+def _parse_csv_variants(raw: str | None) -> list[str]:
+    values = [item.strip() for item in str(raw or "").split(",") if item.strip()]
+    return values or list_live_variants()
+
+
+def cmd_live_strategy_board(args: argparse.Namespace) -> None:
+    p = _paths()
+    live_dir = p["live_dir"]
+    live_dir.mkdir(parents=True, exist_ok=True)
+
+    market_data = AlpacaLiveMarketData(
+        symbol=args.symbol,
+        feed=args.feed,
+        history_business_days=args.history_business_days,
+    )
+    seeded = market_data.seed_history(force=args.force_seed)
+    seed_cutoff_ts = pd.Timestamp(seeded["timestamp"].max()) if not seeded.empty else None
+
+    broker = AlpacaPaperBroker() if args.with_account else None
+    try:
+        rows = run_live_strategy_board_loop(
+            market_data=market_data,
+            broker=broker,
+            strategy_names=_parse_csv_variants(args.variants),
+            symbol=args.symbol,
+            refresh_seconds=args.refresh_seconds,
+            duration_seconds=args.duration_seconds,
+            output_dir=live_dir,
+            min_live_timestamp=seed_cutoff_ts,
+        )
+        if not rows.empty:
+            rows.to_parquet(live_dir / "live_strategy_board_history.parquet", index=False)
+            logger.info("Saved live strategy board history to %s", live_dir / "live_strategy_board_history.parquet")
+    finally:
+        market_data.stop()
+        if broker is not None:
+            broker.stop_trade_updates()
+
+
+def cmd_live_paper_strategy(args: argparse.Namespace) -> None:
+    p = _paths()
+    live_dir = p["live_dir"]
+    live_dir.mkdir(parents=True, exist_ok=True)
+
+    market_data = AlpacaLiveMarketData(
+        symbol=args.symbol,
+        feed=args.feed,
+        history_business_days=args.history_business_days,
+    )
+    seeded = market_data.seed_history(force=args.force_seed)
+    seed_cutoff_ts = pd.Timestamp(seeded["timestamp"].max()) if not seeded.empty else None
+    broker = AlpacaPaperBroker(allow_live=args.allow_live)
+    runner = LivePaperStrategyRunner(
+        market_data=market_data,
+        broker=broker,
+        variant_name=args.variant,
+        symbol=args.symbol,
+        sigma_target=args.sigma_target,
+        lev_cap=args.lev_cap,
+        dry_run=args.dry_run,
+        min_live_timestamp=seed_cutoff_ts,
+    )
+    try:
+        rows = runner.run(
+            refresh_seconds=args.refresh_seconds,
+            duration_seconds=args.duration_seconds,
+        )
+        if not rows.empty:
+            rows.to_parquet(live_dir / f"{args.variant}_live_runtime.parquet", index=False)
+            _dump_json(
+                live_dir / f"{args.variant}_live_runtime_latest.json",
+                rows.iloc[-1].to_dict(),
+            )
+            logger.info("Saved live runtime snapshots to %s", live_dir / f"{args.variant}_live_runtime.parquet")
+    finally:
+        market_data.stop()
+        broker.stop_trade_updates()
+
+
 def cmd_run_system_baseline_engine(args: argparse.Namespace) -> None:
     p = _paths()
     bars = _read_parquet_required(p["enriched"])
@@ -692,6 +778,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_realism_args(p_bt_mlsf)
     _add_realistic_soft_improvement_args(p_bt_mlsf)
     p_bt_mlsf.set_defaults(func=cmd_backtest_ml_scoreforward)
+
+    p_live_board = sub.add_parser("live_strategy_board", help="Stream live Alpaca bars and evaluate baseline + top realistic strategies")
+    p_live_board.add_argument("--symbol", default="SPY")
+    p_live_board.add_argument("--feed", default=None, help="Alpaca live feed name, for example iex or sip")
+    p_live_board.add_argument("--variants", default=",".join(list_live_variants()))
+    p_live_board.add_argument("--history-business-days", type=int, default=20)
+    p_live_board.add_argument("--refresh-seconds", type=float, default=5.0)
+    p_live_board.add_argument("--duration-seconds", type=float, default=300.0)
+    p_live_board.add_argument("--with-account", action="store_true", help="Also fetch paper account/position state while monitoring")
+    p_live_board.add_argument("--force-seed", action="store_true", help="Force-refresh the historical warmup bars before streaming")
+    p_live_board.set_defaults(func=cmd_live_strategy_board)
+
+    p_live_paper = sub.add_parser("live_paper_strategy", help="Run one live websocket-driven paper strategy")
+    p_live_paper.add_argument("--variant", choices=list_live_variants(), default="soft_hybrid_7_5")
+    p_live_paper.add_argument("--symbol", default="SPY")
+    p_live_paper.add_argument("--feed", default=None, help="Alpaca live feed name, for example iex or sip")
+    p_live_paper.add_argument("--history-business-days", type=int, default=20)
+    p_live_paper.add_argument("--refresh-seconds", type=float, default=5.0)
+    p_live_paper.add_argument("--duration-seconds", type=float, default=300.0)
+    p_live_paper.add_argument("--sigma-target", type=float, default=0.02)
+    p_live_paper.add_argument("--lev-cap", type=float, default=4.0)
+    p_live_paper.add_argument("--dry-run", action="store_true", help="Compute actions without routing paper orders")
+    p_live_paper.add_argument("--allow-live", action="store_true", help="Override the paper-only broker safety check")
+    p_live_paper.add_argument("--force-seed", action="store_true", help="Force-refresh the historical warmup bars before streaming")
+    p_live_paper.set_defaults(func=cmd_live_paper_strategy)
 
     p_run = sub.add_parser("run_system", help="Run the modular engine system")
     run_sub = p_run.add_subparsers(dest="run_system_command", required=True)

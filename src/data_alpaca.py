@@ -4,15 +4,35 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+
+try:
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    ALPACA_SDK_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on runtime environment
+    DataFeed = None
+    StockHistoricalDataClient = None
+    StockBarsRequest = None
+    TimeFrame = None
+    ALPACA_SDK_AVAILABLE = False
 
 from .config import load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _require_alpaca_sdk() -> None:
+    if not ALPACA_SDK_AVAILABLE:
+        raise ImportError(
+            "alpaca-py is required for Alpaca historical data access. "
+            "Install it in the active environment before calling fetch_minute_bars."
+        )
 
 
 def _sanitize_for_filename(value: str) -> str:
@@ -74,6 +94,7 @@ def fetch_minute_bars(
     start: str,
     end: str,
     adjustment: str = "raw",
+    feed: str | Any | None = None,
     force: bool = False,
 ) -> pd.DataFrame:
     """Fetch 1-minute bars within [start, end), with parquet caching.
@@ -83,11 +104,13 @@ def fetch_minute_bars(
         start: Interval start timestamp string.
         end: Interval end timestamp string (exclusive in returned dataframe).
         adjustment: Alpaca adjustment mode (e.g., "raw", "split", "dividend", "all").
+        feed: Optional market-data feed, for example ``"iex"``.
         force: If True, ignore cached parquet and refetch from Alpaca.
 
     Returns:
         pd.DataFrame: Columns are timestamp, open, high, low, close, volume.
     """
+    _require_alpaca_sdk()
     config = load_config()
     data_dir = config.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +160,7 @@ def fetch_minute_bars(
                 start=chunk_start.to_pydatetime(),
                 end=chunk_end.to_pydatetime(),
                 adjustment=adjustment,
+                feed=DataFeed(str(feed).lower()) if (feed is not None and DataFeed is not None and not isinstance(feed, DataFeed)) else feed,
                 limit=10_000,
             )
             response = client.get_stock_bars(request)
@@ -178,7 +202,7 @@ def fetch_minute_bars(
 
     except Exception as exc:
         logger.exception("Failed to fetch bars from Alpaca for %s: %s", symbol, exc)
-        raise RuntimeError(f"Failed to fetch minute bars for {symbol}") from exc
+        raise RuntimeError(f"Failed to fetch minute bars for {symbol}: {exc}") from exc
 
 
 def save_bars_parquet(df: pd.DataFrame, output_path: str) -> None:
