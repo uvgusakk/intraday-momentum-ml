@@ -21,11 +21,11 @@ Canonical research modules:
 
 Canonical current realistic score-forward summary:
 
-| method | final_equity | total_return_pct | sharpe | max_drawdown |
-|---|---:|---:|---:|---:|
-| `soft` | `120396.904439` | `20.396904` | `0.383525` | `-0.202688` |
-| `mm` | `98606.674252` | `-1.393326` | `0.037862` | `-0.162954` |
-| `baseline` | `91686.893773` | `-8.313106` | `-0.171875` | `-0.187587` |
+| method | total_return_pct | sharpe | max_drawdown |
+|---|---:|---:|---:|
+| `soft` | `20.396904` | `0.383525` | `-0.202688` |
+| `mm` | `-1.393326` | `0.037862` | `-0.162954` |
+| `baseline` | `-8.313106` | `-0.171875` | `-0.187587` |
 
 Those numbers come from:
 
