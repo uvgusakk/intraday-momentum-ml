@@ -1,0 +1,25 @@
+[1m[32m✔[39;0m[1m Job intraday-momentum-ml-live-job in region europe-west1[m
+Executed 1 time
+Last executed 2026-04-03T22:30:08.216684Z with execution intraday-momentum-ml-live-job-48r74
+Last updated on 2026-04-03T22:29:51.239362Z by ulianahusak@gmail.com
+ 
+Tasks:               1
+Parallelism:         No limit
+Container None
+  Image:             europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml/intraday-momentum-ml-live:v1
+  Command:           /usr/local/bin/run-live-strategy
+  Memory:            4Gi
+  CPU:               2
+  Env vars:
+    DATA_DIR         /tmp/data
+    LIVE_DURATION_SECONDS 300
+    LIVE_HISTORY_BUSINESS_DAYS 1
+    LIVE_REFRESH_SECONDS 5
+    LIVE_SYMBOL      SPY
+    LIVE_VARIANTS    baseline,soft_hybrid_7_5,soft_hybrid_10,soft_hybrid_5
+  Secrets:
+    ALPACA_API_KEY   alpaca-api-key:latest
+    ALPACA_API_SECRET alpaca-api-secret:latest
+Task Timeout:        1h
+Max Retries:         0
+Service account:     2239993769-compute@developer.gserviceaccount.com

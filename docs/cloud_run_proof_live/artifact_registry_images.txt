@@ -1,0 +1,5 @@
+IMAGE                                                                                                      DIGEST                                                                   CREATE_TIME          UPDATE_TIME          SIZE
+europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml/intraday-momentum-ml       sha256:179cabef66ea2b39d6be7e45be6e997727615a64f6bf7df3c6da062ae4f820f4  2026-04-03T22:51:58  2026-04-03T22:51:58  330164309
+europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml/intraday-momentum-ml       sha256:9df0c78d1ee775aa505df2ff005792d37f68c88130a0d68c8018b3ad53428bb4  2026-04-03T23:07:27  2026-04-03T23:07:27  342855868
+europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml/intraday-momentum-ml-live  sha256:3bb9a6f8ee4395e82c8b1b5cb986402b88d033e797ad4d7ed347e850df64171c  2026-04-04T00:27:42  2026-04-04T00:27:42  342892200
+europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml/intraday-momentum-ml-live  sha256:7e1c88d17afa17bb597024c3de46906dab43f5a93bf6a7fff704718605848ef5  2026-04-04T00:20:20  2026-04-04T00:27:42  342892113

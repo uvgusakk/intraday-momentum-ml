@@ -1,0 +1,18 @@
+
+Container called exit(0).
+2026-04-03 18:35:59,443 INFO alpaca.data.live.websocket - data stream stopped
+2026-04-03 18:35:58,783 INFO __main__ - Saved live strategy board history to /tmp/data/live/live_strategy_board_history.parquet
+2026-04-03 18:30:54,075 INFO alpaca.data.live.websocket - subscribed to bars: ['SPY'], updatedBars: ['SPY']
+2026-04-03 18:30:53,993 INFO alpaca.data.live.websocket - connected to wss://stream.data.alpaca.markets/v2/iex
+  soft_hybrid_5    SPY 2026-04-02 16:00:00-04:00   flat             0           False             False            True 655.76 NaN NaN 652.763583                  0.0        100000.0       1.0   646.425       154           0     NaN        1.0             True          flat             0           False      none warming_live_stream              True                    5.0      Realistic soft-sized overlay with hybrid catastrophic minute stops at 5 bps.
+ soft_hybrid_10    SPY 2026-04-02 16:00:00-04:00   flat             0           False             False            True 655.76 NaN NaN 652.763583                  0.0        100000.0       1.0   646.425       154           0     NaN        1.0             True          flat             0           False      none warming_live_stream              True                   10.0     Realistic soft-sized overlay with hybrid catastrophic minute stops at 10 bps.
+soft_hybrid_7_5    SPY 2026-04-02 16:00:00-04:00   flat             0           False             False            True 655.76 NaN NaN 652.763583                  0.0        100000.0       1.0   646.425       154           0     NaN        1.0             True          flat             0           False      none warming_live_stream              True                    7.5    Realistic soft-sized overlay with hybrid catastrophic minute stops at 7.5 bps.
+       baseline    SPY 2026-04-02 16:00:00-04:00   flat             0           False             False            True 655.76 NaN NaN 652.763583                  0.0        100000.0       1.0   646.425       154           0     NaN        1.0             True          flat             0           False      none warming_live_stream             False                    0.0 Paper baseline breakout logic with realistic execution settings and no ML sizing.
+       strategy symbol                 timestamp signal  desired_side  actionable_now  is_decision_time  should_flatten  close  UB  LB       VWAP  breakout_margin_bps  account_equity  leverage  day_open  base_qty  target_qty  p_good  size_mult  overlay_enabled position_side  position_qty  stop_triggered stop_mode        stream_state  hybrid_stop_mode  catastrophic_stop_bps                                                               variant_description
+2026-04-03 18:30:53,840 INFO src.live_strategy_runtime - 
+2026-04-03 18:30:53,560 INFO alpaca.data.live.websocket - connecting to wss://stream.data.alpaca.markets/v2/iex
+2026-04-03 18:30:53,560 INFO alpaca.data.live.websocket - starting data websocket connection
+2026-04-03 18:30:53,558 INFO alpaca.data.live.websocket - started data stream
+2026-04-03 18:30:53,545 INFO src.data_alpaca - Saved 408 bars to /tmp/data/SPY_1min_2026-04-02_00-00_2026-04-03_18-30.parquet
+2026-04-03 18:30:53,500 INFO src.data_alpaca - Chunk 2026-04-02T04:00:00+00:00 -> 2026-04-03T22:30:00+00:00 returned 408 bars.
+2026-04-03 18:30:53,108 INFO src.data_alpaca - Fetching 1-minute bars from Alpaca symbol=SPY start=2026-04-02T04:00:00+00:00 end=2026-04-03T22:30:00+00:00 adjustment=raw
