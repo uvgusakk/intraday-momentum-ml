@@ -6,6 +6,7 @@ the repository.
 Repository:
 
 - [intraday-momentum-ml](https://github.com/uvgusakk/intraday-momentum-ml)
+- [System Overview](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/SYSTEM_OVERVIEW.md)
 
 ## 1. Batch Research Job
 

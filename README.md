@@ -1,5 +1,7 @@
 # intraday_momentum_ml
 
+Important: read the [System Overview](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/SYSTEM_OVERVIEW.md) first.
+
 Single-symbol intraday momentum research for SPY with:
 
 - a paper-style baseline strategy,
@@ -28,7 +30,7 @@ are outputs of the research and reporting pipeline, not source-of-truth code.
 
 Additional documentation:
 
-- [System Overview](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/SYSTEM_OVERVIEW.md)
+- [System Overview](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/SYSTEM_OVERVIEW.md)
 - [Cloud Run Proof](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/CLOUD_RUN_PROOF.md)
 
 ## Strategy Idea
