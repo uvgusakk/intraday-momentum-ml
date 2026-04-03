@@ -256,6 +256,231 @@ print(df[['split_id', 'method', 'final_equity', 'sharpe', 'max_drawdown']].to_st
 PY
 ```
 
+## Docker Batch Run
+
+The repository includes a narrow container entrypoint for the current serious
+batch path only. It does not add any live-trading behavior; it just runs the
+existing CLI pipeline inside Docker.
+
+Files:
+
+- [Dockerfile](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/Dockerfile)
+- [run_serious_batch.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docker/run_serious_batch.sh)
+- [.dockerignore](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/.dockerignore)
+
+Build the image:
+
+```bash
+cd /Users/ulianahusak/WUTIS_2026/intraday_momentum_ml
+docker build -t intraday-momentum-ml:local .
+```
+
+Run a quick local smoke batch without touching your local `data/` metrics:
+
+```bash
+mkdir -p /tmp/intraday-momentum-ml-docker-data
+
+docker run --rm \
+  --env-file .env \
+  -e DATA_DIR=/app/data \
+  -e BATCH_MODE=full_pipeline \
+  -e BATCH_SYMBOL=SPY \
+  -e BATCH_START=2025-01-01 \
+  -e BATCH_END=2026-01-01 \
+  -e BATCH_TRAIN_MONTHS=6 \
+  -e BATCH_VAL_MONTHS=1 \
+  -e BATCH_TEST_MONTHS=1 \
+  -e BATCH_STEP_MONTHS=1 \
+  -e BATCH_METHODS=soft \
+  -v /tmp/intraday-momentum-ml-docker-data:/app/data \
+  intraday-momentum-ml:local
+```
+
+That entrypoint defaults to `full_pipeline`, which runs:
+
+1. `fetch`
+2. `preprocess`
+3. `build_ml_dataset`
+4. `train_ml`
+5. `backtest_ml_scoreforward`
+
+If you already have prepared data and just want the final batch run, use:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -e DATA_DIR=/app/data \
+  -e BATCH_MODE=scoreforward_only \
+  -e BATCH_METHODS=soft,mm \
+  -v /absolute/path/to/data:/app/data \
+  intraday-momentum-ml:local
+```
+
+To inspect the container without running the batch entrypoint, override the
+command:
+
+```bash
+docker run --rm intraday-momentum-ml:local python -m src.cli --help
+```
+
+## Live Websocket Runtime
+
+The research and score-forward metrics remain unchanged. Live and paper-routing
+behavior now lives in a separate websocket path:
+
+- [src/live_alpaca.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/live_alpaca.py)
+  - Alpaca historical warmup, websocket bars, and paper broker adapter
+- [src/live_strategy_runtime.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/live_strategy_runtime.py)
+  - baseline plus the top 3 realistic live variants:
+    - `baseline`
+    - `soft_hybrid_7_5`
+    - `soft_hybrid_10`
+    - `soft_hybrid_5`
+
+### Live strategy board
+
+Monitor all four variants together over the Alpaca websocket and save the
+latest board under `data/live/`:
+
+```bash
+python -m src.cli live_strategy_board \
+  --symbol SPY \
+  --variants baseline,soft_hybrid_7_5,soft_hybrid_10,soft_hybrid_5 \
+  --with-account \
+  --duration-seconds 300
+```
+
+Outputs:
+
+- `data/live/live_strategy_board_latest.csv`
+- `data/live/live_strategy_board_latest.json`
+- `data/live/live_strategy_board_history.parquet`
+
+### Live paper run for one selected strategy
+
+Route one strategy at a time to Alpaca paper trading:
+
+```bash
+python -m src.cli live_paper_strategy \
+  --variant soft_hybrid_7_5 \
+  --symbol SPY \
+  --duration-seconds 300
+```
+
+For a dry run with no paper orders:
+
+```bash
+python -m src.cli live_paper_strategy \
+  --variant soft_hybrid_7_5 \
+  --symbol SPY \
+  --duration-seconds 300 \
+  --dry-run
+```
+
+Outputs:
+
+- `data/live/soft_hybrid_7_5_live_runtime.parquet`
+- `data/live/soft_hybrid_7_5_live_runtime_latest.json`
+
+Docker helper for the live board:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -e DATA_DIR=/app/data \
+  -e LIVE_DURATION_SECONDS=300 \
+  -v /tmp/intraday-momentum-ml-docker-data:/app/data \
+  intraday-momentum-ml:local \
+  /usr/local/bin/run-live-strategy
+```
+
+## GCP Deployment Path
+
+The narrow deployment target for the current serious path is:
+
+1. Artifact Registry for the image
+2. Cloud Run Jobs for batch execution
+3. Secret Manager for Alpaca credentials
+
+This keeps deployment aligned with the existing batch-oriented workflow.
+
+For the live websocket runtime, keep the code separate from the batch job. A
+live deployment should use a dedicated long-lived runtime target after the
+paper-routing path is validated locally.
+
+Helper scripts:
+
+- [create_secrets_from_env.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/gcp/create_secrets_from_env.sh)
+- [deploy_cloud_run_job.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/gcp/deploy_cloud_run_job.sh)
+
+### 1. Authenticate gcloud
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+```
+
+### 2. Set your project and region
+
+```bash
+export GCP_PROJECT_ID="your-project-id"
+export GCP_REGION="europe-west1"
+```
+
+### 3. Create Alpaca secrets from your local `.env`
+
+```bash
+./gcp/create_secrets_from_env.sh
+```
+
+This uploads:
+
+- `alpaca-api-key`
+- `alpaca-api-secret`
+
+### 4. Deploy or update the Cloud Run Job
+
+```bash
+chmod +x gcp/*.sh
+
+export BATCH_MODE="scoreforward_only"
+export BATCH_METHODS="soft,mm"
+
+./gcp/deploy_cloud_run_job.sh
+```
+
+The script:
+
+1. enables required Google APIs
+2. creates Artifact Registry if needed
+3. builds the Docker image locally
+4. pushes it to Artifact Registry
+5. creates or updates a Cloud Run Job
+
+By default the Cloud Run Job uses:
+
+- `DATA_DIR=/tmp/data`
+- `BATCH_MODE=scoreforward_only`
+- `BATCH_METHODS=soft,mm`
+
+The container writes job outputs to ephemeral storage and logs the final summary
+to Cloud Logging. If you later want durable artifacts, the next step is to add
+Cloud Storage export.
+
+### 5. Execute the Cloud Run Job
+
+```bash
+gcloud run jobs execute intraday-momentum-ml-batch --region "$GCP_REGION" --wait
+```
+
+### 6. Inspect logs
+
+```bash
+gcloud run jobs executions list --job intraday-momentum-ml-batch --region "$GCP_REGION"
+```
+
+You can also inspect the job and execution logs in the Google Cloud Console.
+
 ## Expected Serious-Method Ordering
 
 With the corrected rolling retrain / score-forward evaluation, the validated
@@ -279,18 +504,13 @@ If your numbers diverge materially, check:
 - that the enriched bars were rebuilt from the same raw cache,
 - and that the walk-forward model artifacts were retrained before the backtest.
 
-## Notebook
+## Notebooks
 
-The current research notebook is:
+The active notebook set is:
 
-- [notebooks/02_strategy_selection_and_update_report.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/02_strategy_selection_and_update_report.ipynb)
-
-It documents:
-
-- why the evaluation protocol was corrected,
-- what the paper-inspired overlays were,
-- why realistic execution materially reduced the optimistic backtest metrics,
-- why the execution-aligned `baseline_trade` label replaced the earlier
-  fixed-horizon label in the serious path,
-- why `soft` is still the recommended realistic strategy,
-- and how the final ranking was established.
+- [notebooks/01_working_research.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/01_working_research.ipynb)
+  - end-to-end research workflow and the Alpaca live notebook demo section
+- [notebooks/03_realistic_soft_improvements.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/03_realistic_soft_improvements.ipynb)
+  - realistic `soft` / hybrid-stop comparison and path diagnostics
+- [notebooks/04_unseen_2025_holdout_check.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/04_unseen_2025_holdout_check.ipynb)
+  - whole-timeline and holdout robustness checks
