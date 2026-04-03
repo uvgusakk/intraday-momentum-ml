@@ -26,6 +26,11 @@ not treated as serious active methods.
 Generated artifacts are written under `data/` and `reports/`. Those directories
 are outputs of the research and reporting pipeline, not source-of-truth code.
 
+Additional documentation:
+
+- [System Overview](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/SYSTEM_OVERVIEW.md)
+- [Cloud Run Proof](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/CLOUD_RUN_PROOF.md)
+
 ## Strategy Idea
 
 ### Baseline
