@@ -3,11 +3,12 @@
 This document explains the project in plain order:
 
 1. how the idea started,
-2. how it was extended with ML,
-3. how realism changed the conclusions,
-4. which realistic variants survived,
-5. how the live websocket system is separated from the research metrics,
-6. and how the whole project was containerized and deployed.
+2. what the first paper-style results looked like,
+3. what realism means in this repository,
+4. how realism changed the conclusions,
+5. which realistic variants survived,
+6. how the live websocket system is separated from the research metrics,
+7. and how the whole project was containerized and deployed.
 
 Repository:
 
@@ -70,7 +71,55 @@ Relevant code:
 - [train_ml.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/train_ml.py)
 - [backtest_ml_filter.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/backtest_ml_filter.py)
 
-## 4. Why Realism Became Necessary
+## 4. First Paper-Style Result Before Realism
+
+Before realistic execution frictions were added, the score-forward comparison
+looked materially stronger.
+
+Paper-style pre-realism summary:
+
+| method | total_return_pct | sharpe | max_drawdown |
+|---|---:|---:|---:|
+| `soft` | `42.574393` | `0.915792` | `-0.124481` |
+| `mm` | `34.383715` | `0.844447` | `-0.129612` |
+| `baseline` | `32.748903` | `0.748184` | `-0.131480` |
+
+Why those numbers were not enough:
+
+- fills were too optimistic,
+- stop handling was too forgiving,
+- and the resulting Sharpe could not be treated as execution-realistic.
+
+So this stage is part of the research story, but not the final standard the
+project now trusts.
+
+## 5. What Realism Means In This Repository
+
+Realism here does not mean a full exchange simulator. It means correcting the
+largest backtest assumptions that were likely flattering the strategy.
+
+In this repository, realism means:
+
+1. **next-bar execution**
+   - do not decide on a bar close and fill on that same close
+   - instead, act on the next available bar
+2. **minute-by-minute stop monitoring**
+   - do not wait only for the next 30-minute decision checkpoint
+   - monitor stop conditions on the minute bars
+3. **spread/slippage proxy**
+   - include a simple adverse execution penalty instead of only a flat
+     commission model
+
+These changes are important because they affect exactly the parts that can make
+an intraday backtest look unrealistically smooth:
+
+- entries,
+- exits,
+- churn,
+- drawdown,
+- and the Sharpe ratio.
+
+## 6. Why Realism Became Necessary
 
 The early results looked stronger than they should have.
 
@@ -96,7 +145,7 @@ Relevant code:
 - [scoreforward_eval.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/scoreforward_eval.py)
 - [ml_overlay_robust.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/ml_overlay_robust.py)
 
-## 5. The Core Workflow
+## 7. The Core Workflow
 
 The workflow is now:
 
@@ -118,7 +167,7 @@ Relevant code:
 - [scoreforward_eval.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/scoreforward_eval.py)
 - [cli.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/cli.py)
 
-## 6. Canonical Research Result
+## 8. Canonical Research Result Under Realism
 
 The canonical current realistic score-forward summary is:
 
@@ -136,7 +185,15 @@ Interpretation:
 
 This is the research path the repository keeps as canonical.
 
-## 7. Realistic Extension Search And The Top 3 Variants
+The reason it is canonical is not that it has the highest number ever observed.
+It is canonical because it is the most stable, disciplined summary of the
+current serious path:
+
+- `baseline` as the realistic reference,
+- `soft` as the current best serious ML overlay,
+- `mm` as the retained benchmark extension.
+
+## 9. Realistic Extension Search And The Top 3 Variants
 
 After realism was added, the project explored hybrid stop variants that reduce
 noise exits while keeping catastrophic protection between decision points.
@@ -148,6 +205,28 @@ The top 3 realistic extensions found in that bounded search were:
 | `soft_hybrid_7_5` | `76.950741` | `0.909068` | `-0.221610` |
 | `soft_hybrid_10` | `72.510460` | `0.870794` | `-0.255491` |
 | `soft_hybrid_5` | `62.298459` | `0.801717` | `-0.198020` |
+
+What each of these does:
+
+- `soft_hybrid_7_5`
+  - keeps the realistic soft-size overlay,
+  - but treats minute stop breaches as immediately actionable only when they are
+    catastrophic by 7.5 bps
+  - goal: cut noisy stop-outs without removing emergency protection
+- `soft_hybrid_10`
+  - same idea, but with a looser 10 bps catastrophic threshold
+  - this reduces churn further, but allows somewhat larger adverse excursions
+- `soft_hybrid_5`
+  - same idea, but with a tighter 5 bps catastrophic threshold
+  - this is the most conservative of the top 3 and has the best drawdown of the
+    three hybrid winners
+
+Why these extensions were tested:
+
+- once realistic minute-stop monitoring was added, pure stop churn became one of
+  the main performance drags
+- the hybrid stop mechanism was designed to preserve catastrophic protection
+  while avoiding needless exit/re-entry loops on smaller intraminute touches
 
 These are important, but they are deliberately kept separate from the canonical
 `soft/mm/baseline` research summary. The reason is discipline:
@@ -169,7 +248,7 @@ Notebook references:
 - [03_realistic_soft_improvements.ipynb](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/notebooks/03_realistic_soft_improvements.ipynb)
 - [04_unseen_2025_holdout_check.ipynb](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/notebooks/04_unseen_2025_holdout_check.ipynb)
 
-## 8. Live Websocket And Paper-Trading Setup
+## 10. Live Websocket And Paper-Trading Setup
 
 The live layer is separate from the research layer.
 
@@ -198,7 +277,7 @@ CLI entrypoints:
 - `python -m src.cli live_strategy_board`
 - `python -m src.cli live_paper_strategy`
 
-## 9. Environment Setup
+## 11. Environment Setup
 
 This project expects a local `.env` file, but `.env` itself must never be
 committed.
@@ -226,7 +305,7 @@ Key variables:
 For this documentation pass, `.env` was not inspected. The committed contract is
 the example file only.
 
-## 10. Containerization
+## 12. Containerization
 
 The project was then containerized so it could run reproducibly outside the
 local notebook environment.
@@ -246,7 +325,7 @@ That separation is deliberate:
 - batch research runs are finite,
 - live websocket runs are operational monitoring / paper-trading sessions.
 
-## 11. Google Cloud Deployment
+## 13. Google Cloud Deployment
 
 The project was deployed to Google Cloud in two separate ways:
 
@@ -268,16 +347,17 @@ Deployment proof:
 
 - [CLOUD_RUN_PROOF.md](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/CLOUD_RUN_PROOF.md)
 
-## 12. What We End Up With
+## 14. What We End Up With
 
 At the end, the repository contains:
 
 1. a reproducible SPY intraday momentum research pipeline,
-2. a realistic score-forward evaluation path,
-3. a documented set of stronger realistic hybrid candidates,
-4. a live Alpaca websocket monitoring and paper-routing layer,
-5. a Dockerized runtime,
-6. and Google Cloud deployment proof for both batch and live jobs.
+2. a documented paper-style pre-realism reference stage,
+3. a realistic score-forward evaluation path,
+4. a documented set of stronger realistic hybrid candidates,
+5. a live Alpaca websocket monitoring and paper-routing layer,
+6. a Dockerized runtime,
+7. and Google Cloud deployment proof for both batch and live jobs.
 
 The important engineering choice is that these layers are connected, but not
 mixed together:
