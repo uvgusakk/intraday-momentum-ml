@@ -1,0 +1,3 @@
+   JOB                         EXECUTION                         REGION        RUNNING  COMPLETE  CREATED                  RUN BY
+[32m✔[39;0m  intraday-momentum-ml-batch  intraday-momentum-ml-batch-jjbnl  europe-west1  0        1 / 1     2026-04-03 21:08:04 UTC  ulianahusak@gmail.com
+[31;1mX[39;0m  intraday-momentum-ml-batch  intraday-momentum-ml-batch-4s8qv  europe-west1  0        0 / 1     2026-04-03 20:56:59 UTC  ulianahusak@gmail.com
