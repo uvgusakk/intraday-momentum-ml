@@ -1,4 +1,4 @@
-[1m[32m✔[39;0m[1m Job intraday-momentum-ml-live-job in region europe-west1[m
+✔ Job intraday-momentum-ml-live-job in region europe-west1
 Executed 1 time
 Last executed 2026-04-03T22:30:08.216684Z with execution intraday-momentum-ml-live-job-48r74
 Last updated on 2026-04-03T22:29:51.239362Z by ulianahusak@gmail.com

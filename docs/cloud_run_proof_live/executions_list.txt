@@ -1,2 +1,2 @@
    JOB                            EXECUTION                            REGION        RUNNING  COMPLETE  CREATED                  RUN BY
-[32m✔[39;0m  intraday-momentum-ml-live-job  intraday-momentum-ml-live-job-48r74  europe-west1  0        1 / 1     2026-04-03 22:30:08 UTC  ulianahusak@gmail.com
+✔  intraday-momentum-ml-live-job  intraday-momentum-ml-live-job-48r74  europe-west1  0        1 / 1     2026-04-03 22:30:08 UTC  ulianahusak@gmail.com

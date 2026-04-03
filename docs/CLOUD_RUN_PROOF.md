@@ -1,23 +1,29 @@
 # Cloud Run Proof
 
-This document summarizes the successful Google Cloud deployment evidence that is
-stored in the repository.
+This document records the deployed Google Cloud evidence that is stored inside
+the repository.
 
-## Deployed Batch Target
+Repository:
 
-- Project: `project-5d782c2e-0e9a-4cca-878`
-- Region: `europe-west1`
-- Job: `intraday-momentum-ml-batch`
-- Image repo: `europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml`
-- Successful image tag: `v2`
+- [intraday-momentum-ml](https://github.com/uvgusakk/intraday-momentum-ml)
 
-## Successful Execution
+## 1. Batch Research Job
 
-- Execution name: `intraday-momentum-ml-batch-jjbnl`
-- Result: completed successfully
-- Reported runtime: about 6 minutes 24 seconds
+Deployed target:
 
-The batch job was configured with:
+- project: `project-5d782c2e-0e9a-4cca-878`
+- region: `europe-west1`
+- job: `intraday-momentum-ml-batch`
+- image repo: `europe-west1-docker.pkg.dev/project-5d782c2e-0e9a-4cca-878/intraday-momentum-ml`
+- successful image tag: `v2`
+
+Successful execution:
+
+- execution: `intraday-momentum-ml-batch-jjbnl`
+- result: completed successfully
+- reported runtime: about 6 minutes 24 seconds
+
+Batch configuration:
 
 - `BATCH_MODE=full_pipeline`
 - `BATCH_METHODS=soft,mm`
@@ -26,29 +32,63 @@ The batch job was configured with:
 - `BATCH_END=2026-01-01`
 - `DATA_DIR=/tmp/data`
 
-## Raw Evidence Files
+Raw proof files:
 
-The raw command outputs used as deployment proof are stored here:
+- [job_describe.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof/job_describe.txt)
+- [executions_list.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof/executions_list.txt)
+- [execution_describe.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof/execution_describe.txt)
+- [job_logs.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof/job_logs.txt)
+- [artifact_registry_images.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof/artifact_registry_images.txt)
 
-- [/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/job_describe.txt](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/job_describe.txt)
-- [/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/executions_list.txt](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/executions_list.txt)
-- [/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/execution_describe.txt](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/execution_describe.txt)
-- [/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/job_logs.txt](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/job_logs.txt)
-- [/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/artifact_registry_images.txt](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/cloud_run_proof/artifact_registry_images.txt)
+## 2. Live Websocket Job
 
-## What This Proves
+Deployed target:
+
+- project: `project-5d782c2e-0e9a-4cca-878`
+- region: `europe-west1`
+- job: `intraday-momentum-ml-live-job`
+
+Successful execution:
+
+- execution: `intraday-momentum-ml-live-job-48r74`
+- result: completed successfully
+
+Live job purpose:
+
+- warm recent history from Alpaca
+- connect to the live Alpaca websocket
+- evaluate:
+  - `baseline`
+  - `soft_hybrid_7_5`
+  - `soft_hybrid_10`
+  - `soft_hybrid_5`
+- run for a bounded live session duration
+
+Raw proof files:
+
+- [job_describe.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof_live/job_describe.txt)
+- [executions_list.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof_live/executions_list.txt)
+- [execution_describe.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof_live/execution_describe.txt)
+- [job_logs.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof_live/job_logs.txt)
+- [artifact_registry_images.txt](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/cloud_run_proof_live/artifact_registry_images.txt)
+
+## 3. What This Proves
 
 This repository now contains evidence for all of the following:
 
-1. the project was containerized
-2. the image was pushed to Artifact Registry
-3. the Cloud Run Job was created
-4. the job executed successfully in Google Cloud
-5. the execution logs and job metadata were captured into versioned proof files
+1. the project was containerized,
+2. the image was pushed to Artifact Registry,
+3. a Cloud Run batch job was created and executed successfully,
+4. a separate Cloud Run live websocket job was created and executed successfully,
+5. the raw GCP command outputs and logs were captured into versioned proof
+   files.
 
-## Limitation
+## 4. Limitation
 
-The current Cloud Run batch job writes working files to `/tmp/data`, which is
-ephemeral container storage. That is enough to demonstrate deployment and
-execution, but not enough for durable cloud artifact retention. The next cloud
-improvement would be writing final outputs to Google Cloud Storage.
+Both jobs currently use ephemeral container storage for working files. That is
+enough to demonstrate deployment and execution, but it is not the same as a
+durable production storage design.
+
+The next cloud-hardening step would be:
+
+- writing final outputs to Google Cloud Storage.

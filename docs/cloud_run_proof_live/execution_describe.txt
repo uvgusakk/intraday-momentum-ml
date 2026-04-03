@@ -1,4 +1,4 @@
-[1m[32m✔[39;0m[1m Execution intraday-momentum-ml-live-job-48r74 in region europe-west1[m
+✔ Execution intraday-momentum-ml-live-job-48r74 in region europe-west1
 1 task completed successfully
 Elapsed time: 5 minutes and 54 seconds
  
@@ -24,4 +24,4 @@ Container None
 Task Timeout:        1h
 Max Retries:         0
 Service account:     2239993769-compute@developer.gserviceaccount.com
-[32m✔ Execution completed successfully in 5m50.23s.[39;0m
+✔ Execution completed successfully in 5m50.23s.

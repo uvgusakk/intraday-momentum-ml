@@ -28,8 +28,8 @@ are outputs of the research and reporting pipeline, not source-of-truth code.
 
 Additional documentation:
 
-- [System Overview](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/SYSTEM_OVERVIEW.md)
-- [Cloud Run Proof](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docs/CLOUD_RUN_PROOF.md)
+- [System Overview](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/SYSTEM_OVERVIEW.md)
+- [Cloud Run Proof](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docs/CLOUD_RUN_PROOF.md)
 
 ## Strategy Idea
 
@@ -81,23 +81,23 @@ configuration.
 
 The serious path is organized around a small set of modules:
 
-- [src/baseline_strategy.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/baseline_strategy.py)
+- [src/baseline_strategy.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/baseline_strategy.py)
   - baseline wrapper and baseline-specific helpers
-- [src/backtest_ml_filter.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/backtest_ml_filter.py)
+- [src/backtest_ml_filter.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/backtest_ml_filter.py)
   - ML sizing backtest on top of the baseline signal
-- [src/scoreforward_eval.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/scoreforward_eval.py)
+- [src/scoreforward_eval.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/scoreforward_eval.py)
   - class-based rolling retrain / score-forward evaluation
-- [src/features_ml.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/features_ml.py)
+- [src/features_ml.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/features_ml.py)
   - ML dataset construction
-- [src/train_ml.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/train_ml.py)
+- [src/train_ml.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/train_ml.py)
   - walk-forward model training
-- [src/ml_overlay_robust.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/ml_overlay_robust.py)
+- [src/ml_overlay_robust.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/ml_overlay_robust.py)
   - reusable exposure overlay helpers, including the market-vol overlay
-- [src/cli.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/cli.py)
+- [src/cli.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/cli.py)
   - command-line entry points
 
 The `ScoreforwardRunner` class in
-[src/scoreforward_eval.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/scoreforward_eval.py)
+[src/scoreforward_eval.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/scoreforward_eval.py)
 keeps the evaluation flow explicit:
 
 1. build the candidate ML dataset,
@@ -112,7 +112,8 @@ keeps the evaluation flow explicit:
 From the project root:
 
 ```bash
-cd /Users/ulianahusak/WUTIS_2026/intraday_momentum_ml
+git clone https://github.com/uvgusakk/intraday-momentum-ml.git
+cd intraday-momentum-ml
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -269,14 +270,13 @@ existing CLI pipeline inside Docker.
 
 Files:
 
-- [Dockerfile](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/Dockerfile)
-- [run_serious_batch.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/docker/run_serious_batch.sh)
-- [.dockerignore](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/.dockerignore)
+- [Dockerfile](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/Dockerfile)
+- [run_serious_batch.sh](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/docker/run_serious_batch.sh)
+- [.dockerignore](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/.dockerignore)
 
 Build the image:
 
 ```bash
-cd /Users/ulianahusak/WUTIS_2026/intraday_momentum_ml
 docker build -t intraday-momentum-ml:local .
 ```
 
@@ -333,9 +333,9 @@ docker run --rm intraday-momentum-ml:local python -m src.cli --help
 The research and score-forward metrics remain unchanged. Live and paper-routing
 behavior now lives in a separate websocket path:
 
-- [src/live_alpaca.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/live_alpaca.py)
+- [src/live_alpaca.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/live_alpaca.py)
   - Alpaca historical warmup, websocket bars, and paper broker adapter
-- [src/live_strategy_runtime.py](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/src/live_strategy_runtime.py)
+- [src/live_strategy_runtime.py](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/src/live_strategy_runtime.py)
   - baseline plus the top 3 realistic live variants:
     - `baseline`
     - `soft_hybrid_7_5`
@@ -415,8 +415,8 @@ paper-routing path is validated locally.
 
 Helper scripts:
 
-- [create_secrets_from_env.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/gcp/create_secrets_from_env.sh)
-- [deploy_cloud_run_job.sh](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/gcp/deploy_cloud_run_job.sh)
+- [create_secrets_from_env.sh](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/gcp/create_secrets_from_env.sh)
+- [deploy_cloud_run_job.sh](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/gcp/deploy_cloud_run_job.sh)
 
 ### 1. Authenticate gcloud
 
@@ -513,9 +513,9 @@ If your numbers diverge materially, check:
 
 The active notebook set is:
 
-- [notebooks/01_working_research.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/01_working_research.ipynb)
+- [notebooks/01_working_research.ipynb](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/notebooks/01_working_research.ipynb)
   - end-to-end research workflow and the Alpaca live notebook demo section
-- [notebooks/03_realistic_soft_improvements.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/03_realistic_soft_improvements.ipynb)
+- [notebooks/03_realistic_soft_improvements.ipynb](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/notebooks/03_realistic_soft_improvements.ipynb)
   - realistic `soft` / hybrid-stop comparison and path diagnostics
-- [notebooks/04_unseen_2025_holdout_check.ipynb](/Users/ulianahusak/WUTIS_2026/intraday_momentum_ml/notebooks/04_unseen_2025_holdout_check.ipynb)
+- [notebooks/04_unseen_2025_holdout_check.ipynb](https://github.com/uvgusakk/intraday-momentum-ml/blob/main/notebooks/04_unseen_2025_holdout_check.ipynb)
   - whole-timeline and holdout robustness checks
