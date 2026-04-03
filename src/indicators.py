@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 import pandas as pd
 
@@ -45,17 +43,17 @@ def compute_intraday_move_from_open(df: pd.DataFrame) -> pd.DataFrame:
 
     out = _normalize_time_columns(df)
 
-    open_0930_by_day = out.loc[out["time"] == "09:30", ["date", "open"]].rename(
-        columns={"open": "open_0930"}
-    )
+    open_0930_by_day = out.loc[out["time"] == "09:30", ["date", "open"]].rename(columns={"open": "open_0930"})
 
     if open_0930_by_day.empty:
         raise ValueError("No 09:30 bars found; cannot compute open_0930 anchor.")
 
-    out = out.merge(open_0930_by_day, on="date", how="left")
+    out = out.merge(open_0930_by_day, on=["date"], how="left")
 
     # Fallback: if a day has no explicit 09:30 bar, use that day's first open.
-    out["open_0930"] = out["open_0930"].fillna(out.groupby("date", sort=False)["open"].transform("first"))
+    out["open_0930"] = out["open_0930"].fillna(
+        out.groupby("date", sort=False)["open"].transform("first")
+    )
 
     out["move_abs"] = (out["close"] / out["open_0930"] - 1.0).abs()
     return out
@@ -85,13 +83,12 @@ def compute_sigma_profile(df: pd.DataFrame, lookback_days: int = 14) -> pd.DataF
         return s.shift(1).rolling(window=lookback_days, min_periods=1).mean()
 
     minute_day["sigma"] = minute_day.groupby("time", sort=False)["move_abs"].transform(_roll_prior)
-
     out = out.merge(minute_day[["trade_date", "time", "sigma"]], on=["trade_date", "time"], how="left")
     out = out.drop(columns=["trade_date"])
     return out
 
 
-def compute_gap_adjusted_bands(df: pd.DataFrame, vm: float = 1.0) -> pd.DataFrame:
+def compute_gap_adjusted_bands(df: pd.DataFrame) -> pd.DataFrame:
     """Compute gap-adjusted upper/lower bands using sigma profile.
 
     Adds columns:
@@ -105,23 +102,22 @@ def compute_gap_adjusted_bands(df: pd.DataFrame, vm: float = 1.0) -> pd.DataFram
     out = _normalize_time_columns(df)
     out["trade_date"] = pd.to_datetime(out["date"]).dt.date
 
-    day_table = out.groupby("trade_date", as_index=False, sort=True).agg(
+    day_table = out.groupby(["trade_date"], as_index=False, sort=True).agg(
         open_0930=("open", "first"),
         close_1600=("close", "last"),
     )
-
     day_table["prevClose"] = day_table["close_1600"].shift(1)
     day_table["anchorUpper"] = np.maximum(day_table["open_0930"], day_table["prevClose"])
     day_table["anchorLower"] = np.minimum(day_table["open_0930"], day_table["prevClose"])
 
     out = out.merge(
         day_table[["trade_date", "anchorUpper", "anchorLower"]],
-        on="trade_date",
+        on=["trade_date"],
         how="left",
     )
 
-    out["UB"] = out["anchorUpper"] * (1.0 + vm * out["sigma"])
-    out["LB"] = out["anchorLower"] * (1.0 - vm * out["sigma"])
+    out["UB"] = out["anchorUpper"] * (1.0 + out["sigma"])
+    out["LB"] = out["anchorLower"] * (1.0 - out["sigma"])
 
     out = out.drop(columns=["trade_date", "anchorUpper", "anchorLower"])
     return out
@@ -151,7 +147,7 @@ def add_vwap(df: pd.DataFrame) -> pd.DataFrame:
     return compute_vwap(df)
 
 
-def add_rolling_features(df: pd.DataFrame, windows: Sequence[int]) -> pd.DataFrame:
+def add_rolling_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     """Add basic rolling mean/std features for close and volume.
 
     This helper is kept lightweight for compatibility with earlier scaffold code.

@@ -8,11 +8,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .baseline_strategy import run_baseline_backtest
+from .baseline_strategy import compute_break_strength, run_baseline_backtest
 from .config import load_config
 
 logger = logging.getLogger(__name__)
 NY_TZ = "America/New_York"
+BASE_FEATURE_COLS = [
+    "signed_break_distance",
+    "break_strength",
+    "band_width",
+    "vwap_diff",
+    "intraday_return",
+    "ret_30m",
+    "realized_vol_30m",
+    "whipsaw_60m",
+    "time_of_day_minutes",
+    "tod_sin",
+    "tod_cos",
+]
 
 
 def _normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,7 +50,6 @@ def _normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
 
 def _compute_feature_frame(bars: pd.DataFrame) -> pd.DataFrame:
     f = bars.copy()
-
     f["open_0930"] = f.groupby("date", sort=False)["open"].transform("first")
     f["midband"] = (f["UB"] + f["LB"]) / 2.0
 
@@ -66,13 +78,13 @@ def _compute_feature_frame(bars: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
     f["time_of_day_minutes"] = minutes
 
-    # 390 minutes in a regular U.S. session (09:30 -> 16:00).
     angle = 2.0 * np.pi * (f["time_of_day_minutes"] / 390.0)
     f["tod_sin"] = np.sin(angle)
     f["tod_cos"] = np.cos(angle)
 
     f["band_width"] = (f["UB"] - f["LB"]) / f["open_0930"]
     f["vwap_diff"] = (f["close"] - f["VWAP"]) / f["VWAP"]
+    f["break_strength"] = f.apply(compute_break_strength, axis=1)
 
     return f
 
@@ -88,21 +100,19 @@ def _extract_candidates_with_labels(
     if trades.empty:
         return pd.DataFrame(columns=["timestamp", "side", "y", "pnl", "trade_return", "costs"])
 
-    trades["timestamp"] = pd.to_datetime(trades["entry_timestamp"])
+    decision_col = "decision_timestamp" if "decision_timestamp" in trades.columns else "entry_timestamp"
+    trades["timestamp"] = pd.to_datetime(trades[decision_col])
     if trades["timestamp"].dt.tz is None:
         trades["timestamp"] = trades["timestamp"].dt.tz_localize(NY_TZ)
     else:
         trades["timestamp"] = trades["timestamp"].dt.tz_convert(NY_TZ)
-
     trades["side"] = trades["side"].map({"long": 1, "short": -1})
     trades["y"] = (trades["pnl"] > 0).astype(int)
     gross_notional = (trades["entry_price"].abs() * trades["shares"]).replace(0, np.nan)
     trades["trade_return"] = (trades["pnl"] / gross_notional).fillna(0.0)
 
-    # Candidate events are baseline opens/flips; each row here is an opened trade.
-    return trades[
-        ["timestamp", "side", "y", "pnl", "trade_return", "costs"]
-    ].drop_duplicates().reset_index(drop=True)
+    cols = ["timestamp", "side", "y", "pnl", "trade_return", "costs"]
+    return trades[cols].drop_duplicates().reset_index(drop=True)
 
 
 def _extract_candidates_fixed_horizon(
@@ -120,30 +130,32 @@ def _extract_candidates_fixed_horizon(
     if trades.empty:
         return pd.DataFrame(columns=["timestamp", "side", "y", "pnl", "trade_return", "costs"])
 
-    # Candidate timestamps/sides from baseline entries.
     c = trades.copy()
-    c["timestamp"] = pd.to_datetime(c["entry_timestamp"])
+    decision_col = "decision_timestamp" if "decision_timestamp" in c.columns else "entry_timestamp"
+    c["timestamp"] = pd.to_datetime(c[decision_col])
     if c["timestamp"].dt.tz is None:
         c["timestamp"] = c["timestamp"].dt.tz_localize(NY_TZ)
     else:
         c["timestamp"] = c["timestamp"].dt.tz_convert(NY_TZ)
     c["side"] = c["side"].map({"long": 1, "short": -1})
-
     px = bars[["timestamp", "date", "close"]].copy().sort_values("timestamp")
     px["close_fwd"] = px.groupby("date", sort=False)["close"].shift(-horizon_mins)
 
     labeled = c[["timestamp", "side"]].merge(
         px[["timestamp", "close", "close_fwd"]],
-        on="timestamp",
+        on=["timestamp"],
         how="left",
         validate="many_to_one",
     )
     labeled = labeled.dropna(subset=["close", "close_fwd"]).copy()
 
-    # Approximate round-trip cost in return terms using per-share costs.
     commission = float(kwargs.get("commission_per_share", 0.0035))
     slippage = float(kwargs.get("slippage_per_share", 0.001))
-    roundtrip_cost_ret = (2.0 * (commission + slippage)) / labeled["close"].replace(0, np.nan)
+    spread_bps = float(kwargs.get("spread_bps", 0.0))
+    roundtrip_cost_ret = (
+        2.0 * (commission + slippage)
+        + (spread_bps / 10000.0) * labeled["close"]
+    ) / labeled["close"].replace(0, np.nan)
 
     gross_ret = labeled["side"] * (labeled["close_fwd"] / labeled["close"] - 1.0)
     net_ret = (gross_ret - roundtrip_cost_ret).fillna(0.0)
@@ -153,7 +165,8 @@ def _extract_candidates_fixed_horizon(
     labeled["costs"] = roundtrip_cost_ret.fillna(0.0)
     labeled["y"] = (labeled["trade_return"] > 0).astype(int)
 
-    return labeled[["timestamp", "side", "y", "pnl", "trade_return", "costs"]].drop_duplicates().reset_index(drop=True)
+    cols = ["timestamp", "side", "y", "pnl", "trade_return", "costs"]
+    return labeled[cols].drop_duplicates().reset_index(drop=True)
 
 
 def build_ml_dataset(
@@ -161,16 +174,19 @@ def build_ml_dataset(
     backtest_kwargs: dict | None = None,
     label_mode: str = "fixed_horizon",
     horizon_mins: int = 30,
+    persist: bool = True,
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    """Build ML dataset from baseline candidate entries and save it to parquet.
+    """Build ML dataset from baseline candidate entries.
 
     Args:
         df: Long intraday bars dataframe with UB/LB/VWAP already computed.
         backtest_kwargs: Optional kwargs forwarded to run_baseline_backtest.
+        label_mode: ``baseline_trade`` or ``fixed_horizon``.
+        horizon_mins: Forward horizon for ``fixed_horizon`` labels.
+        persist: When True, save the dataset to ``DATA_DIR/ml_dataset.parquet``.
 
     Returns:
-        tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-            X feature matrix, y binary labels, meta columns (date, timestamp, side).
+        X feature matrix, y labels, meta columns (date, timestamp, side, symbol, pnl...).
     """
     if label_mode not in {"baseline_trade", "fixed_horizon"}:
         raise ValueError("label_mode must be one of: 'baseline_trade', 'fixed_horizon'")
@@ -184,30 +200,20 @@ def build_ml_dataset(
     else:
         candidates = _extract_candidates_with_labels(bars, backtest_kwargs=backtest_kwargs)
 
+    meta_cols = ["date", "timestamp", "side", "pnl", "trade_return", "costs"]
+
     if candidates.empty:
         logger.warning("No baseline candidate entries found; returning empty dataset.")
-        X_empty = pd.DataFrame(
-            columns=[
-                "signed_break_distance",
-                "band_width",
-                "vwap_diff",
-                "intraday_return",
-                "ret_30m",
-                "realized_vol_30m",
-                "whipsaw_60m",
-                "time_of_day_minutes",
-                "tod_sin",
-                "tod_cos",
-            ]
-        )
+        X_empty = pd.DataFrame(columns=list(BASE_FEATURE_COLS))
         y_empty = pd.Series(dtype=int, name="y")
-        meta_empty = pd.DataFrame(columns=["date", "timestamp", "side", "pnl", "trade_return", "costs"])
-        _save_ml_dataset(X_empty, y_empty, meta_empty)
+        meta_empty = pd.DataFrame(columns=meta_cols)
+        if persist:
+            _save_ml_dataset(X_empty, y_empty, meta_empty)
         return X_empty, y_empty, meta_empty
 
     merged = candidates.merge(
         feat,
-        on="timestamp",
+        on=["timestamp"],
         how="left",
         validate="one_to_one",
     )
@@ -218,26 +224,14 @@ def build_ml_dataset(
         (merged["LB"] - merged["close"]) / merged["LB"],
     )
 
-    feature_cols = [
-        "signed_break_distance",
-        "band_width",
-        "vwap_diff",
-        "intraday_return",
-        "ret_30m",
-        "realized_vol_30m",
-        "whipsaw_60m",
-        "time_of_day_minutes",
-        "tod_sin",
-        "tod_cos",
-    ]
+    merged = merged.dropna(subset=BASE_FEATURE_COLS + ["y"]).reset_index(drop=True)
 
-    merged = merged.dropna(subset=feature_cols + ["y"]).reset_index(drop=True)
-
-    X = merged[feature_cols].copy()
+    X = merged[BASE_FEATURE_COLS].copy()
     y = merged["y"].astype(int).rename("y")
-    meta = merged[["date", "timestamp", "side", "pnl", "trade_return", "costs"]].copy()
+    meta = merged[meta_cols].copy()
 
-    _save_ml_dataset(X, y, meta)
+    if persist:
+        _save_ml_dataset(X, y, meta)
     return X, y, meta
 
 

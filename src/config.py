@@ -7,6 +7,20 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# Validated strategy defaults for the current recommended ML overlay.
+DEFAULT_DECISION_FREQ_MINS = 30
+DEFAULT_SCOREFORWARD_LABEL_MODE = "baseline_trade"
+DEFAULT_ML_LABEL_HORIZON_MINS = 60
+DEFAULT_SOFT_SIZE_FLOOR = 0.15
+DEFAULT_SOFT_SIZE_CAP = 2.25
+DEFAULT_MM_LOOKBACK_DAYS = 20
+DEFAULT_MM_FLOOR = 0.75
+DEFAULT_MM_CAP = 1.25
+DEFAULT_USE_NEXT_BAR_OPEN = True
+DEFAULT_MINUTE_STOP_MONITORING = True
+DEFAULT_EXECUTION_SPREAD_BPS = 1.0
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Application configuration values loaded from environment variables."""

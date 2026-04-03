@@ -1,4 +1,16 @@
-"""Walk-forward training utilities for trade-filter classifiers."""
+"""Walk-forward training utilities for trade-filter classifiers.
+
+This module now supports two target regimes:
+
+- ``binary``: the legacy positive-vs-negative target already stored in the
+  dataset.
+- ``large_winner``: a split-local target derived from train-window return
+  quantiles. This avoids leaking a global threshold from future data into the
+  training labels.
+
+It also supports side-filtered training (all/long/short) so notebooks can train
+separate models without re-implementing the walk-forward machinery.
+"""
 
 from __future__ import annotations
 
@@ -73,8 +85,17 @@ def _load_ml_dataset() -> pd.DataFrame:
     return df.sort_values(["date", "timestamp"]).reset_index(drop=True)
 
 
+def _coerce_side_filter(df: pd.DataFrame, side_filter: str) -> pd.DataFrame:
+    if side_filter not in {"all", "long", "short"}:
+        raise ValueError("side_filter must be one of: 'all', 'long', 'short'")
+    if side_filter == "all":
+        return df.copy()
+    side_value = 1 if side_filter == "long" else -1
+    return df.loc[pd.to_numeric(df["side"], errors="coerce") == side_value].copy()
+
+
 def _feature_columns(df: pd.DataFrame) -> list[str]:
-    excluded = {"date", "timestamp", "side", "y", "pnl", "trade_return", "net_pnl", "return", "costs"}
+    excluded = {"date", "timestamp", "side", "symbol", "y", "pnl", "trade_return", "net_pnl", "return", "costs"}
     cols = [c for c in df.columns if c not in excluded]
     if not cols:
         raise ValueError("No feature columns found in dataset.")
@@ -88,6 +109,44 @@ def _trade_return_series(df: pd.DataFrame) -> pd.Series:
 
     # Fallback proxy if only labels are available.
     return df["y"].map({1: 1.0, 0: -1.0}).astype(float)
+
+
+def _build_target_series(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    target_mode: str,
+    target_quantile: float,
+) -> tuple[pd.Series, pd.Series, pd.Series, dict[str, float]]:
+    if target_mode not in {"binary", "large_winner"}:
+        raise ValueError("target_mode must be one of: 'binary', 'large_winner'")
+
+    if target_mode == "binary":
+        return (
+            train_df["y"].astype(int),
+            val_df["y"].astype(int),
+            test_df["y"].astype(int),
+            {"target_mode": "binary", "target_quantile": float("nan"), "train_large_winner_cut": float("nan")},
+        )
+
+    if not 0.5 < float(target_quantile) < 1.0:
+        raise ValueError("target_quantile must be in (0.5, 1.0) for large_winner mode")
+
+    train_ret = _trade_return_series(train_df)
+    val_ret = _trade_return_series(val_df)
+    test_ret = _trade_return_series(test_df)
+    cut = float(np.quantile(train_ret, float(target_quantile)))
+
+    y_train = (train_ret >= cut).astype(int)
+    y_val = (val_ret >= cut).astype(int)
+    y_test = (test_ret >= cut).astype(int)
+    meta = {
+        "target_mode": "large_winner",
+        "target_quantile": float(target_quantile),
+        "train_large_winner_cut": cut,
+    }
+    return y_train, y_val, y_test, meta
 
 
 def _make_walk_forward_splits(
@@ -268,17 +327,21 @@ def _select_threshold(y_val: pd.Series, p_val: np.ndarray, ret_val: pd.Series) -
     return best_thr, best_metrics
 
 
-def train_walk_forward_models(
+def make_split_specs(
+    df: pd.DataFrame,
+    *,
     train_months: int = 12,
     val_months: int = 3,
     test_months: int = 3,
     step_months: int = 3,
-) -> dict[str, Any]:
-    """Train models on walk-forward splits and persist best artifacts/report."""
-    df = _load_ml_dataset()
-    X_cols = _feature_columns(df)
+) -> list[dict[str, Any]]:
+    """Build chronological train/validation/test split specs.
 
-    returns_all = _trade_return_series(df)
+    This helper is reused by both artifact training and score-forward
+    evaluation. It returns non-overlapping test windows when `step_months`
+    matches `test_months`, which is the intended evaluation mode for the
+    project.
+    """
     months_available = len(df["date"].dt.to_period("M").unique())
     needed = train_months + val_months + test_months
 
@@ -312,9 +375,132 @@ def train_walk_forward_models(
             needed,
         )
         split_specs.append(_make_chrono_day_split(df))
+    return split_specs
+
+
+def fit_best_model_bundle(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    target_mode: str = "binary",
+    target_quantile: float = 0.70,
+) -> dict[str, Any]:
+    """Fit candidate models on one split and return the best validated bundle.
+
+    The selected bundle is the same object later persisted to disk by the
+    artifact-training path, but returned in-memory so score-forward evaluation
+    can retrain on each split without saving and reloading intermediate files.
+    """
+    if train_df.empty or val_df.empty or test_df.empty:
+        raise ValueError("train_df, val_df, and test_df must all be non-empty")
+
+    X_cols = _feature_columns(train_df)
+    y_train, y_val, y_test, target_meta = _build_target_series(
+        train_df,
+        val_df,
+        test_df,
+        target_mode=target_mode,
+        target_quantile=target_quantile,
+    )
+    if y_train.nunique() < 2 or y_val.nunique() < 2:
+        raise ValueError("Need at least two classes in train and validation splits")
+
+    X_train = train_df[X_cols]
+    X_val = val_df[X_cols]
+    X_test = test_df[X_cols]
+
+    ret_val = _trade_return_series(val_df)
+    ret_test = _trade_return_series(test_df)
+
+    models = {
+        "logistic": train_logistic_regression(X_train, y_train),
+        "lightgbm": train_lightgbm_classifier(X_train, y_train, X_val=X_val, y_val=y_val),
+    }
+
+    split_models: dict[str, Any] = {}
+    best_bundle: dict[str, Any] | None = None
+    best_score = -1e18
+
+    for model_name, model in models.items():
+        val_scores = _raw_scores(model, X_val)
+        calibrator = PlattCalibrator().fit(val_scores, y_val.to_numpy())
+
+        p_val = calibrator.predict_proba(val_scores)
+        thr, val_metrics = _select_threshold(y_val, p_val, ret_val)
+
+        test_scores = _raw_scores(model, X_test)
+        p_test = calibrator.predict_proba(test_scores)
+        test_metrics = _classification_metrics(y_test, p_test, thr)
+        test_metrics.update(_trading_metrics(ret_test, p_test, thr))
+
+        split_models[model_name] = {
+            "threshold": thr,
+            "validation": val_metrics,
+            "test": test_metrics,
+        }
+
+        score = val_metrics["net_sharpe"]
+        if score > best_score:
+            best_score = score
+            best_bundle = {
+                "model_name": model_name,
+                "model": model,
+                "calibrator": calibrator,
+                "threshold": thr,
+                "prob_q20": float(np.quantile(p_val, 0.2)),
+                "prob_q40": float(np.quantile(p_val, 0.4)),
+                "prob_q60": float(np.quantile(p_val, 0.6)),
+                "prob_q80": float(np.quantile(p_val, 0.8)),
+                "target_meta": target_meta,
+                "metrics": {
+                    "validation": val_metrics,
+                    "test": test_metrics,
+                },
+            }
+
+    if best_bundle is None:
+        raise RuntimeError("No valid model bundle was produced for this split.")
+
+    return {
+        "feature_columns": X_cols,
+        "target_meta": target_meta,
+        "models": split_models,
+        "best_bundle": best_bundle,
+    }
+
+
+def _train_walk_forward_models_from_df(
+    df: pd.DataFrame,
+    *,
+    artifact_dir: Path,
+    train_months: int = 12,
+    val_months: int = 3,
+    test_months: int = 3,
+    step_months: int = 3,
+    target_mode: str = "binary",
+    target_quantile: float = 0.70,
+    side_filter: str = "all",
+) -> dict[str, Any]:
+    """Train models on walk-forward splits and persist best artifacts/report."""
+    df = _coerce_side_filter(df, side_filter)
+    if df.empty:
+        raise ValueError(f"No rows available after applying side_filter={side_filter!r}")
+    X_cols = _feature_columns(df)
+
+    split_specs = make_split_specs(
+        df,
+        train_months=train_months,
+        val_months=val_months,
+        test_months=test_months,
+        step_months=step_months,
+    )
 
     report: dict[str, Any] = {
         "dataset_rows": int(len(df)),
+        "side_filter": side_filter,
+        "target_mode": target_mode,
+        "target_quantile": float(target_quantile) if target_mode == "large_winner" else float("nan"),
         "feature_columns": X_cols,
         "splits": [],
         "best": {},
@@ -334,75 +520,42 @@ def train_walk_forward_models(
 
         if train_df.empty or val_df.empty or test_df.empty:
             continue
-        if train_df["y"].nunique() < 2 or val_df["y"].nunique() < 2:
+        try:
+            bundle_info = fit_best_model_bundle(
+                train_df,
+                val_df,
+                test_df,
+                target_mode=target_mode,
+                target_quantile=target_quantile,
+            )
+        except (ValueError, RuntimeError):
             continue
 
-        X_train, y_train = train_df[X_cols], train_df["y"].astype(int)
-        X_val, y_val = val_df[X_cols], val_df["y"].astype(int)
-        X_test, y_test = test_df[X_cols], test_df["y"].astype(int)
-
-        ret_val = returns_all.loc[val_df.index]
-        ret_test = returns_all.loc[test_df.index]
-
-        models = {
-            "logistic": train_logistic_regression(X_train, y_train),
-            "lightgbm": train_lightgbm_classifier(X_train, y_train, X_val=X_val, y_val=y_val),
-        }
-
-        split_entry: dict[str, Any] = {
+        split_entry = {
             "split_id": split["split_id"],
             "split_type": split["split_type"],
             "train_range": split["train_label"],
             "val_range": split["val_label"],
             "test_range": split["test_label"],
-            "models": {},
+            "target_meta": bundle_info["target_meta"],
+            "models": bundle_info["models"],
         }
 
-        for model_name, model in models.items():
-            val_scores = _raw_scores(model, X_val)
-            calibrator = PlattCalibrator().fit(val_scores, y_val.to_numpy())
-
-            p_val = calibrator.predict_proba(val_scores)
-            thr, val_metrics = _select_threshold(y_val, p_val, ret_val)
-
-            test_scores = _raw_scores(model, X_test)
-            p_test = calibrator.predict_proba(test_scores)
-            test_metrics = _classification_metrics(y_test, p_test, thr)
-            test_metrics.update(_trading_metrics(ret_test, p_test, thr))
-
-            split_entry["models"][model_name] = {
-                "threshold": thr,
-                "validation": val_metrics,
-                "test": test_metrics,
-            }
-
-            # Production selection must use validation only (avoid test leakage).
-            score = val_metrics["net_sharpe"]
-            if score > best_score:
-                best_score = score
-                best_bundle = {
-                    "model_name": model_name,
-                    "model": model,
-                    "calibrator": calibrator,
-                    "threshold": thr,
-                    "prob_q20": float(np.quantile(p_val, 0.2)),
-                    "prob_q40": float(np.quantile(p_val, 0.4)),
-                    "prob_q60": float(np.quantile(p_val, 0.6)),
-                    "prob_q80": float(np.quantile(p_val, 0.8)),
-                    "split_id": split["split_id"],
-                    "metrics": {
-                        "validation": val_metrics,
-                        "test": test_metrics,
-                    },
-                }
-
         report["splits"].append(split_entry)
+
+        candidate_best = dict(bundle_info["best_bundle"])
+        score = float(candidate_best["metrics"]["validation"]["net_sharpe"])
+        if score > best_score:
+            best_score = score
+            best_bundle = {
+                **candidate_best,
+                "split_id": split["split_id"],
+            }
 
     if best_bundle is None:
         raise RuntimeError("No valid walk-forward split/model was produced.")
 
-    config = load_config()
-    model_dir = config.data_dir / "models"
+    model_dir = artifact_dir
     model_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = model_dir / "best_model.joblib"
@@ -422,6 +575,10 @@ def train_walk_forward_models(
                 "prob_q80": float(best_bundle["prob_q80"]),
                 "model_name": best_bundle["model_name"],
                 "split_id": int(best_bundle["split_id"]),
+                "target_mode": str(best_bundle["target_meta"]["target_mode"]),
+                "target_quantile": _to_serializable(best_bundle["target_meta"]["target_quantile"]),
+                "train_large_winner_cut": _to_serializable(best_bundle["target_meta"]["train_large_winner_cut"]),
+                "side_filter": side_filter,
             },
             f,
             indent=2,
@@ -435,6 +592,7 @@ def train_walk_forward_models(
         "prob_q40": float(best_bundle["prob_q40"]),
         "prob_q60": float(best_bundle["prob_q60"]),
         "prob_q80": float(best_bundle["prob_q80"]),
+        "target_meta": best_bundle["target_meta"],
         "metrics": best_bundle["metrics"],
         "artifacts": {
             "model_path": str(model_path),
@@ -458,3 +616,56 @@ def train_walk_forward_models(
         "report_path": report_path,
         "report": report,
     }
+
+
+def train_walk_forward_models(
+    train_months: int = 12,
+    val_months: int = 3,
+    test_months: int = 3,
+    step_months: int = 3,
+    target_mode: str = "binary",
+    target_quantile: float = 0.70,
+    side_filter: str = "all",
+    artifact_subdir: str = "models",
+) -> dict[str, Any]:
+    """Train models on the persisted dataset and save artifacts under ``artifact_subdir``."""
+    df = _load_ml_dataset()
+    config = load_config()
+    artifact_dir = config.data_dir / artifact_subdir
+    return _train_walk_forward_models_from_df(
+        df,
+        artifact_dir=artifact_dir,
+        train_months=train_months,
+        val_months=val_months,
+        test_months=test_months,
+        step_months=step_months,
+        target_mode=target_mode,
+        target_quantile=target_quantile,
+        side_filter=side_filter,
+    )
+
+
+def train_walk_forward_models_from_dataframe(
+    df: pd.DataFrame,
+    artifact_dir: str | Path,
+    *,
+    train_months: int = 12,
+    val_months: int = 3,
+    test_months: int = 3,
+    step_months: int = 3,
+    target_mode: str = "binary",
+    target_quantile: float = 0.70,
+    side_filter: str = "all",
+) -> dict[str, Any]:
+    """Notebook-friendly entry point for walk-forward training on an in-memory dataset."""
+    return _train_walk_forward_models_from_df(
+        df.copy(),
+        artifact_dir=Path(artifact_dir),
+        train_months=train_months,
+        val_months=val_months,
+        test_months=test_months,
+        step_months=step_months,
+        target_mode=target_mode,
+        target_quantile=target_quantile,
+        side_filter=side_filter,
+    )

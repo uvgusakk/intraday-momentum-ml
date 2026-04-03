@@ -44,7 +44,6 @@ def preprocess_bars(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     work["timestamp"] = _ensure_ny_timestamp(work["timestamp"])
 
-    # Filter regular trading hours (inclusive 09:30 and 16:00).
     work = work.loc[
         (work["timestamp"].dt.time >= pd.Timestamp("09:30").time())
         & (work["timestamp"].dt.time <= pd.Timestamp("16:00").time())
@@ -65,28 +64,21 @@ def preprocess_bars(df: pd.DataFrame) -> pd.DataFrame:
         grids.append(pd.DataFrame({"timestamp": pd.date_range(start=start_ts, end=end_ts, freq="min")}))
 
     full_grid = pd.concat(grids, ignore_index=True)
-
     merged = full_grid.merge(
         work[["timestamp", "open", "high", "low", "close", "volume"]],
         on="timestamp",
         how="left",
     )
-
     merged["date"] = merged["timestamp"].dt.strftime("%Y-%m-%d")
     merged["time"] = merged["timestamp"].dt.strftime("%H:%M")
-
-    # Fill close forward only within each day.
     merged["close"] = merged.groupby("date", sort=False)["close"].ffill()
-
-    # Missing rows take OHLC from close and zero volume.
     merged["open"] = merged["open"].fillna(merged["close"])
     merged["high"] = merged["high"].fillna(merged["close"])
     merged["low"] = merged["low"].fillna(merged["close"])
     merged["volume"] = merged["volume"].fillna(0)
-
-    merged = merged.sort_values("timestamp").reset_index(drop=True)
-
-    return merged[["timestamp", "open", "high", "low", "close", "volume", "date", "time"]]
+    return merged.sort_values("timestamp").reset_index(drop=True)[
+        ["timestamp", "open", "high", "low", "close", "volume", "date", "time"]
+    ]
 
 
 def split_by_day(df: pd.DataFrame) -> dict[date, pd.DataFrame]:

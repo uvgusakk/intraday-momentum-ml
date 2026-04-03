@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import time
+import math
+import warnings
 
 import numpy as np
 import pandas as pd
-
-from .metrics import summarize_backtest
 
 NY_TZ = "America/New_York"
 
@@ -23,6 +22,7 @@ class OpenTrade:
     entry_timestamp: pd.Timestamp
     entry_price: float
     entry_cost: float
+    decision_timestamp: pd.Timestamp | None = None
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -96,6 +96,137 @@ def _stop_triggered(trade: OpenTrade, row: pd.Series) -> bool:
     return float(row["close"]) > stop
 
 
+def apply_execution_spread(raw_price: float, side: int, spread_bps: float = 0.0) -> float:
+    """Apply a simple half-spread penalty in the adverse direction."""
+    price = float(raw_price)
+    if price <= 0 or float(spread_bps) <= 0.0 or int(side) == 0:
+        return price
+    half_spread = float(spread_bps) / 20000.0
+    if int(side) > 0:
+        return price * (1.0 + half_spread)
+    return price * (1.0 - half_spread)
+
+
+def stop_trigger_details(
+    trade: OpenTrade,
+    row: pd.Series,
+    *,
+    minute_aware: bool = False,
+) -> tuple[bool, float]:
+    """Return whether the stop triggered and the raw exit price to use.
+
+    With ``minute_aware=False`` the legacy behavior is preserved: a stop is
+    evaluated on the bar close only. With ``minute_aware=True`` the stop uses a
+    simple minute-bar approximation:
+
+    - long stop: trigger when the bar opens below the stop or trades through it
+      via the low;
+    - short stop: trigger when the bar opens above the stop or trades through it
+      via the high.
+    """
+    if int(trade.side) > 0:
+        stop_level = max(float(row["UB"]), float(row["VWAP"]))
+        if not minute_aware:
+            return (float(row["close"]) < stop_level, float(row["close"]))
+        if float(row.get("open", row["close"])) <= stop_level:
+            return True, float(row.get("open", row["close"]))
+        if float(row.get("low", row["close"])) <= stop_level:
+            return True, stop_level
+        return False, float(row["close"])
+
+    stop_level = min(float(row["LB"]), float(row["VWAP"]))
+    if not minute_aware:
+        return (float(row["close"]) > stop_level, float(row["close"]))
+    if float(row.get("open", row["close"])) >= stop_level:
+        return True, float(row.get("open", row["close"]))
+    if float(row.get("high", row["close"])) >= stop_level:
+        return True, stop_level
+    return False, float(row["close"])
+
+
+def get_execution_row(
+    day_df: pd.DataFrame,
+    decision_idx: int,
+    *,
+    use_next_bar_open: bool = False,
+) -> tuple[int, pd.Series, str]:
+    """Return the row used for execution and the price field to read from it."""
+    if not bool(use_next_bar_open):
+        return int(decision_idx), day_df.iloc[int(decision_idx)], "close"
+    exec_idx = min(int(decision_idx) + 1, len(day_df) - 1)
+    return exec_idx, day_df.iloc[exec_idx], "open"
+
+
+def compute_break_strength(row: pd.Series, tiny_eps: float = 1e-12) -> float:
+    """Compute dimensionless breakout strength relative to current band width."""
+    mid = (float(row["UB"]) + float(row["LB"])) / 2.0
+    width = max(float(row["UB"]) - float(row["LB"]), tiny_eps)
+    return abs(float(row["close"]) - mid) / width
+
+
+def compute_breakout_margin(row: pd.Series, desired_side: int) -> float:
+    """Compute breakout margin outside the active band for the desired side."""
+    if int(desired_side) > 0:
+        ub = float(row["UB"])
+        return max((float(row["close"]) - ub) / ub, 0.0) if ub != 0 else 0.0
+    if int(desired_side) < 0:
+        lb = float(row["LB"])
+        return max((lb - float(row["close"])) / lb, 0.0) if lb != 0 else 0.0
+    return 0.0
+
+
+def flip_allowed_by_hysteresis(
+    row: pd.Series,
+    current_side: int,
+    desired_side: int,
+    flip_hysteresis_bps: float = 0.0,
+) -> bool:
+    """Return whether an opposite-side flip clears the hysteresis margin."""
+    if float(flip_hysteresis_bps) <= 0.0:
+        return True
+
+    if int(current_side) == 0 or int(desired_side) == 0 or int(desired_side) != -int(current_side):
+        return True
+
+    delta = float(flip_hysteresis_bps) / 10000.0
+    close = float(row["close"])
+    ub = float(row["UB"])
+    lb = float(row["LB"])
+
+    if int(current_side) > 0 and int(desired_side) < 0:
+        return close < lb * (1.0 - delta)
+    if int(current_side) < 0 and int(desired_side) > 0:
+        return close > ub * (1.0 + delta)
+    return True
+
+
+def trend_signal_still_valid(row: pd.Series, side: int) -> bool:
+    """Return whether the active position still has same-direction breakout confirmation."""
+    if int(side) > 0:
+        return float(row["close"]) > float(row["UB"])
+    if int(side) < 0:
+        return float(row["close"]) < float(row["LB"])
+    return False
+
+
+def compute_scalein_target_shares(
+    base_shares: int,
+    size_mult: float,
+    trend_boost_mult: float,
+    trend_boost_cap_mult: float,
+    aum_prev: float,
+    lev_cap: float,
+    price: float,
+) -> int:
+    """Compute capped target shares for a trend-day scale-in event."""
+    if base_shares <= 0 or price <= 0:
+        return 0
+    effective_boost = min(float(trend_boost_mult), float(trend_boost_cap_mult))
+    target = int(math.floor(base_shares * float(size_mult) * effective_boost))
+    max_qty = int(math.floor((float(aum_prev) * float(lev_cap)) / float(price))) if lev_cap > 0 else target
+    return max(0, min(target, max_qty))
+
+
 def run_baseline_backtest(
     df: pd.DataFrame,
     initial_aum: float = 100000,
@@ -105,174 +236,83 @@ def run_baseline_backtest(
     slippage_per_share: float = 0.001,
     decision_freq_mins: int = 30,
     first_trade_time: str = "10:00",
+    margin_min_bps: float = 0.0,
+    flip_hysteresis_bps: float = 0.0,
+    cooldown_steps: int = 0,
+    cooldown_on_stop: bool = True,
+    trend_scalein_enabled: bool = False,
+    trend_persistence_steps: int = 2,
+    trend_boost_mult: float = 1.8,
+    trend_boost_cap_mult: float = 2.5,
+    trend_scalein_once: bool = True,
+    use_next_bar_open: bool = False,
+    minute_stop_monitoring: bool = False,
+    spread_bps: float = 0.0,
+    break_strength_min: float | None = None,
+    daily_sizing: pd.DataFrame | None = None,
+    trade_start_date: str | pd.Timestamp | None = None,
 ) -> dict:
-    """Run baseline intraday backtest and return equity, trades, and summary."""
-    bars = _normalize_df(df)
-    decision_times = _build_decision_time_set(decision_freq_mins, first_trade_time)
-    cost_per_share = commission_per_share + slippage_per_share
+    """Run the baseline backtest through the modular engine wrapper.
 
-    sizing = _compute_daily_sizing_table(bars, initial_aum, sigma_target, lev_cap)
-    sizing_idx = sizing.set_index("date")
-
-    equity_rows: list[dict] = []
-    trades: list[dict] = []
-
-    aum_prev = float(initial_aum)
-    total_notional_traded = 0.0
-
-    for day, day_df in bars.groupby("date", sort=True):
-        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
-        day_open = float(day_df.iloc[0]["open"])
-
-        sigma_spy = float(sizing_idx.loc[day, "sigma_spy"]) if day in sizing_idx.index else float("nan")
-        leverage = float(sizing_idx.loc[day, "leverage"]) if day in sizing_idx.index else 1.0
-        shares = int(math.floor((aum_prev * leverage) / day_open)) if day_open > 0 else 0
-
-        day_pnl = 0.0
-        day_costs = 0.0
-        open_trade: OpenTrade | None = None
-
-        decisions = day_df.loc[day_df["timestamp"].dt.time.isin(decision_times)]
-
-        for _, row in decisions.iterrows():
-            px = float(row["close"])
-            ts = row["timestamp"]
-
-            # Trailing stop checks are evaluated at decision times only.
-            if open_trade is not None and _stop_triggered(open_trade, row):
-                exit_cost = cost_per_share * open_trade.shares
-                gross = open_trade.side * open_trade.shares * (px - open_trade.entry_price)
-                net_close_leg = gross - exit_cost
-
-                day_pnl += net_close_leg
-                day_costs += exit_cost
-                total_notional_traded += open_trade.shares * px
-
-                trades.append(
-                    {
-                        "entry_timestamp": open_trade.entry_timestamp,
-                        "exit_timestamp": ts,
-                        "side": "long" if open_trade.side > 0 else "short",
-                        "shares": open_trade.shares,
-                        "entry_price": open_trade.entry_price,
-                        "exit_price": px,
-                        "pnl": gross - open_trade.entry_cost - exit_cost,
-                        "costs": open_trade.entry_cost + exit_cost,
-                    }
-                )
-                open_trade = None
-
-            desired = _desired_direction(row)
-            current = 0 if open_trade is None else open_trade.side
-
-            if desired != current:
-                if open_trade is not None:
-                    # Flip/flat: close current first.
-                    exit_cost = cost_per_share * open_trade.shares
-                    gross = open_trade.side * open_trade.shares * (px - open_trade.entry_price)
-                    net_close_leg = gross - exit_cost
-
-                    day_pnl += net_close_leg
-                    day_costs += exit_cost
-                    total_notional_traded += open_trade.shares * px
-
-                    trades.append(
-                        {
-                            "entry_timestamp": open_trade.entry_timestamp,
-                            "exit_timestamp": ts,
-                            "side": "long" if open_trade.side > 0 else "short",
-                            "shares": open_trade.shares,
-                            "entry_price": open_trade.entry_price,
-                            "exit_price": px,
-                            "pnl": gross - open_trade.entry_cost - exit_cost,
-                            "costs": open_trade.entry_cost + exit_cost,
-                        }
-                    )
-                    open_trade = None
-
-                if desired != 0 and shares > 0:
-                    entry_cost = cost_per_share * shares
-                    day_pnl -= entry_cost
-                    day_costs += entry_cost
-                    total_notional_traded += shares * px
-
-                    open_trade = OpenTrade(
-                        side=desired,
-                        shares=shares,
-                        entry_timestamp=ts,
-                        entry_price=px,
-                        entry_cost=entry_cost,
-                    )
-
-        # Force close any position at 16:00 (fallback to last bar if 16:00 missing).
-        close_1600 = day_df.loc[day_df["time"] == "16:00"]
-        close_row = close_1600.iloc[-1] if not close_1600.empty else day_df.iloc[-1]
-
-        if open_trade is not None:
-            px = float(close_row["close"])
-            ts = close_row["timestamp"]
-
-            exit_cost = cost_per_share * open_trade.shares
-            gross = open_trade.side * open_trade.shares * (px - open_trade.entry_price)
-            net_close_leg = gross - exit_cost
-
-            day_pnl += net_close_leg
-            day_costs += exit_cost
-            total_notional_traded += open_trade.shares * px
-
-            trades.append(
-                {
-                    "entry_timestamp": open_trade.entry_timestamp,
-                    "exit_timestamp": ts,
-                    "side": "long" if open_trade.side > 0 else "short",
-                    "shares": open_trade.shares,
-                    "entry_price": open_trade.entry_price,
-                    "exit_price": px,
-                    "pnl": gross - open_trade.entry_cost - exit_cost,
-                    "costs": open_trade.entry_cost + exit_cost,
-                }
-            )
-            open_trade = None
-
-        aum_end = aum_prev + day_pnl
-        ret = day_pnl / aum_prev if aum_prev != 0 else 0.0
-
-        equity_rows.append(
-            {
-                "date": day,
-                "equity": aum_end,
-                "daily_pnl": day_pnl,
-                "daily_return": ret,
-                "leverage": leverage,
-                "shares": shares,
-                "sigma_spy": sigma_spy,
-                "costs": day_costs,
-            }
+    The legacy function signature stays unchanged so the CLI and existing
+    notebook code remain compatible while the implementation moves into the new
+    strategy/execution/risk separation.
+    """
+    if break_strength_min is not None:
+        warnings.warn(
+            "break_strength_min is deprecated and ignored; use margin_min_bps instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+    if float(trend_boost_mult) > float(trend_boost_cap_mult):
+        raise ValueError("trend_boost_mult must be <= trend_boost_cap_mult")
+    if int(trend_persistence_steps) < 1:
+        raise ValueError("trend_persistence_steps must be >= 1")
 
-        if day in sizing_idx.index:
-            sizing_idx.loc[day, "aum_prev"] = aum_prev
-            sizing_idx.loc[day, "shares"] = shares
-
-        aum_prev = aum_end
-
-    equity_curve = pd.DataFrame(equity_rows)
-    trades_df = pd.DataFrame(trades)
-
-    summary = summarize_backtest(equity_curve["daily_return"] if not equity_curve.empty else pd.Series(dtype=float))
-    summary.update(
-        {
-            "final_equity": float(equity_curve["equity"].iloc[-1]) if not equity_curve.empty else float(initial_aum),
-            "trades_count": int(len(trades_df)),
-            "turnover": float(total_notional_traded / equity_curve["equity"].mean()) if not equity_curve.empty and float(equity_curve["equity"].mean()) != 0 else 0.0,
-            "total_costs": float(trades_df["costs"].sum()) if not trades_df.empty else 0.0,
-        }
+    from .engine.backtest_engine import (
+        BacktestConfig,
+        BacktestEngine,
+        FixedQuantityRiskManager,
     )
+    from .strategies import BaselineNoiseAreaStrategy
 
+    engine = BacktestEngine(
+        strategy=BaselineNoiseAreaStrategy(
+            decision_freq_mins=decision_freq_mins,
+            first_trade_time=first_trade_time,
+            margin_min_bps=margin_min_bps,
+            flip_hysteresis_bps=flip_hysteresis_bps,
+            cooldown_steps=cooldown_steps,
+            cooldown_on_stop=cooldown_on_stop,
+            trend_scalein_enabled=trend_scalein_enabled,
+            trend_persistence_steps=trend_persistence_steps,
+            trend_boost_mult=trend_boost_mult,
+            trend_boost_cap_mult=trend_boost_cap_mult,
+            trend_scalein_once=trend_scalein_once,
+        ),
+        risk_manager=FixedQuantityRiskManager(),
+        config=BacktestConfig(
+            initial_aum=initial_aum,
+            sigma_target=sigma_target,
+            lev_cap=lev_cap,
+            commission_per_share=commission_per_share,
+            slippage_per_share=slippage_per_share,
+            decision_freq_mins=decision_freq_mins,
+            first_trade_time=first_trade_time,
+            use_next_bar_open=use_next_bar_open,
+            minute_stop_monitoring=minute_stop_monitoring,
+            spread_bps=spread_bps,
+        ),
+    )
+    result = engine.run(
+        df,
+        trade_start_date=trade_start_date,
+        daily_sizing=daily_sizing,
+    )
     return {
-        "equity_curve": equity_curve,
-        "trades": trades_df,
-        "summary": summary,
+        "equity_curve": result.equity_curve,
+        "trades": result.trades,
+        "summary": result.summary,
     }
 
 

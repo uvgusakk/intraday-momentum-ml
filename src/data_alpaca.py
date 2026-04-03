@@ -203,5 +203,4 @@ def load_bars_parquet(path: str, tz_name: str = "America/New_York") -> pd.DataFr
     missing = [col for col in expected if col not in df.columns]
     if missing:
         raise ValueError(f"Parquet file missing required columns: {missing}")
-
     return df[expected].sort_values("timestamp").reset_index(drop=True)
